@@ -1,0 +1,3 @@
+2026-04-20 16:50:05 | INFO | ingest.production_simple | start | input=생산실적현황(간편)_S관.xlsx | sheets=전월,당월 | status=확인 | qty_col=양품수량 | output=data/production_actuals_recent.csv
+2026-04-20 16:50:07 | INFO | ingest.production_simple | after status filter | rows=27319
+2026-04-20 16:50:07 | INFO | ingest.production_simple | write done | rows=27319 | out=data\production_actuals_recent.csv | process_counts={'분리': 5877, '접착': 5557, '누수': 5502, '하이드': 5324, '사출': 5059}
