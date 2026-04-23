@@ -67,6 +67,8 @@ python .\scripts\append_production_actuals.py --input "C:\path\prod.xlsx"
 python .\scripts\ingest_production_actuals_sgwan_simple.py
 ```
 
+참고: 대시보드의 `S관 실적` 탭은 **기준일(사이드바 선택) 당일 실적을 제외**하고, `기준일-1(전일)`까지 집계합니다(당일은 생산 중일 수 있음).
+
 ## GitHub에 올리기(로컬 → 원격)
 
 엑셀 원본은 용량/보안 이슈가 있을 수 있어 **코드만 먼저 업로드**를 권장합니다(`~$*.xlsx`는 자동 제외).

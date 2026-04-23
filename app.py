@@ -11,6 +11,7 @@ from risk_dashboard.logging_utils import get_logger
 from risk_dashboard.logic import available_snapshot_dates, build_dashboard_table
 from risk_dashboard.master_products import build_name_to_code, filter_sgwan, load_master_table, s_product_name_set
 from risk_dashboard.order_progress import load_order_progress_sheet, parse_sheet_date, to_aps_snapshot
+from risk_dashboard.production import build_cutoff_views, summarize_by_process, summarize_daily_total
 from risk_dashboard.schema import APS_COLS
 from risk_dashboard.schema import PROD_COLS, PROD_REQUIRED_COLS
 
@@ -201,7 +202,7 @@ col2.metric("지연 수주", f"{(today_all['상태']=='지연').sum():,}")
 col3.metric("긴급 수주", f"{(today_all['상태']=='긴급').sum():,}")
 col4.metric("일정 변경(지연+개선)", f"{today_all['변경상태'].isin(['지연','개선']).sum():,}")
 
-tabs = st.tabs(["납기 리스크", "일정 변경", "공정 병목", "리스크 리스트", "생산실적(참고)"])
+tabs = st.tabs(["납기 리스크", "일정 변경", "공정 병목", "리스크 리스트", "S관 실적"])
 
 with tabs[0]:
     st.subheader("납기 리스크 현황")
@@ -244,8 +245,70 @@ with tabs[3]:
     )
 
 with tabs[4]:
-    st.subheader("생산실적(참고)")
+    st.subheader("S관 생산실적 현황(간편)")
+    st.caption("컨셉: 전월은 월 전체 / 당월은 기준일-1(전일)까지 집계(당일 제외).")
+
     if prod_df.empty:
         st.info("생산실적 데이터가 없습니다.")
     else:
-        st.dataframe(prod_df.sort_values(["생산일자", "공정", "품목코드"]), use_container_width=True)
+        views = build_cutoff_views(prod_df, asof=asof)
+        st.caption(f"기준일: {views.asof.isoformat()} / 집계 cutoff: {views.cutoff.isoformat()}")
+
+        def _sum_qty(df: pd.DataFrame) -> int:
+            if df.empty:
+                return 0
+            return int(pd.to_numeric(df[PROD_COLS.생산수량], errors="coerce").fillna(0).sum())
+
+        def _n_days(df: pd.DataFrame) -> int:
+            if df.empty:
+                return 0
+            return int(df[PROD_COLS.생산일자].nunique())
+
+        def _n_items(df: pd.DataFrame) -> int:
+            if df.empty:
+                return 0
+            return int(df[PROD_COLS.품목코드].nunique())
+
+        prev_total = _sum_qty(views.prev_month.df)
+        curr_total = _sum_qty(views.curr_month.df)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("전월 생산수량", f"{prev_total:,}")
+        m2.metric("당월 생산수량(MTD)", f"{curr_total:,}")
+        m3.metric("당월 생산일수", f"{_n_days(views.curr_month.df):,}")
+        m4.metric("당월 품목수", f"{_n_items(views.curr_month.df):,}")
+
+        left, right = st.columns(2)
+
+        with left:
+            st.markdown(f"**전월 ({views.prev_month.start.isoformat()} ~ {views.prev_month.end.isoformat()})**")
+            prev_proc = summarize_by_process(views.prev_month.df)
+            if prev_proc.empty:
+                st.info("전월 실적이 없습니다(집계 기준/데이터를 확인하세요).")
+            else:
+                st.bar_chart(prev_proc.set_index(PROD_COLS.공정)[PROD_COLS.생산수량])
+                st.dataframe(prev_proc, use_container_width=True, hide_index=True)
+
+        with right:
+            st.markdown(f"**당월 ({views.curr_month.start.isoformat()} ~ {views.curr_month.end.isoformat()})**")
+            if views.curr_month.end < views.curr_month.start:
+                st.info("당월은 아직 집계 대상이 없습니다(기준일이 월초이거나, cutoff가 월 시작 이전).")
+            else:
+                curr_proc = summarize_by_process(views.curr_month.df)
+                if curr_proc.empty:
+                    st.info("당월 실적이 없습니다(당일 제외/데이터를 확인하세요).")
+                else:
+                    st.bar_chart(curr_proc.set_index(PROD_COLS.공정)[PROD_COLS.생산수량])
+                    st.dataframe(curr_proc, use_container_width=True, hide_index=True)
+
+                daily = summarize_daily_total(views.curr_month.df)
+                if not daily.empty:
+                    st.markdown("**당월 일자별 합계**")
+                    st.line_chart(daily.set_index(PROD_COLS.생산일자)[PROD_COLS.생산수량])
+
+        with st.expander("원천 데이터 보기(전월+당월, cutoff 반영)"):
+            st.dataframe(
+                pd.concat([views.prev_month.df, views.curr_month.df], ignore_index=True)
+                .sort_values([PROD_COLS.생산일자, PROD_COLS.공정, PROD_COLS.품목코드]),
+                use_container_width=True,
+            )
