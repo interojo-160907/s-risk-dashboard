@@ -46,6 +46,17 @@ def _to_date_series(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce").dt.date
 
 
+def filter_by_date_range(df: pd.DataFrame, *, start: date, end: date) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    if PROD_COLS.생산일자 not in df.columns:
+        return df.copy()
+    out = df.copy()
+    out[PROD_COLS.생산일자] = _to_date_series(out[PROD_COLS.생산일자])
+    out = out[out[PROD_COLS.생산일자].notna()].copy()
+    return out[(out[PROD_COLS.생산일자] >= start) & (out[PROD_COLS.생산일자] <= end)].copy()
+
+
 def build_cutoff_views(prod_df: pd.DataFrame, *, asof: date) -> ProductionCutoffViews:
     cutoff = asof - timedelta(days=1)
 
@@ -84,6 +95,32 @@ def build_cutoff_views(prod_df: pd.DataFrame, *, asof: date) -> ProductionCutoff
     )
 
 
+def build_views_with_ranges(
+    prod_df: pd.DataFrame,
+    *,
+    asof: date,
+    prev_start: date | None = None,
+    prev_end: date | None = None,
+    curr_start: date | None = None,
+    curr_end: date | None = None,
+) -> ProductionCutoffViews:
+    base = build_cutoff_views(prod_df, asof=asof)
+    p_start = prev_start or base.prev_month.start
+    p_end = prev_end or base.prev_month.end
+    c_start = curr_start or base.curr_month.start
+    c_end = curr_end or base.curr_month.end
+
+    prev_df = filter_by_date_range(base.prev_month.df, start=p_start, end=p_end) if p_start <= p_end else base.prev_month.df.iloc[0:0].copy()
+    curr_df = filter_by_date_range(base.curr_month.df, start=c_start, end=c_end) if c_start <= c_end else base.curr_month.df.iloc[0:0].copy()
+
+    return ProductionCutoffViews(
+        asof=base.asof,
+        cutoff=base.cutoff,
+        prev_month=ProductionMonthView(label=base.prev_month.label, start=p_start, end=p_end, df=prev_df),
+        curr_month=ProductionMonthView(label=base.curr_month.label, start=c_start, end=c_end, df=curr_df),
+    )
+
+
 def summarize_by_process(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=[PROD_COLS.공정, PROD_COLS.생산수량])
@@ -108,4 +145,3 @@ def summarize_daily_total(df: pd.DataFrame) -> pd.DataFrame:
     )
     out[PROD_COLS.생산수량] = out[PROD_COLS.생산수량].astype(int)
     return out
-

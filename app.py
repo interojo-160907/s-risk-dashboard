@@ -8,7 +8,8 @@ import streamlit as st
 
 from risk_dashboard.io import default_data_paths, load_production_actuals
 from risk_dashboard.logging_utils import get_logger
-from risk_dashboard.production import build_cutoff_views, summarize_by_process, summarize_daily_total
+from risk_dashboard.production import month_start, prev_month_range
+from risk_dashboard.production import build_views_with_ranges, summarize_by_process, summarize_daily_total
 from risk_dashboard.schema import PROD_COLS, PROD_REQUIRED_COLS
 
 
@@ -119,18 +120,65 @@ tabs = st.tabs(["S관 실적"])
 
 with tabs[0]:
     st.subheader("S관 생산실적 현황(간편)")
-    st.caption("컨셉: 전월은 월 전체 / 당월은 기준일-1(전일)까지 집계(당일 제외).")
+    st.caption("컨셉: 전월/당월 기간조회(직접 선택) + 당월 생산실적은 끝공정(누수) 기준.")
+
+    with st.sidebar:
+        st.header("기간조회")
+        cols = st.columns(3)
+        reset_clicked = cols[0].button("해제", use_container_width=True)
+        manual_clicked = cols[1].button("직접", use_container_width=True)
+        auto_clicked = cols[2].button("전월/당월", use_container_width=True)
+
+        if reset_clicked:
+            st.session_state.pop("range_mode", None)
+            for k in ["prev_start", "prev_end", "curr_start", "curr_end"]:
+                st.session_state.pop(k, None)
+        if manual_clicked:
+            st.session_state["range_mode"] = "manual"
+        if auto_clicked:
+            st.session_state["range_mode"] = "auto"
+
+        range_mode = st.session_state.get("range_mode", "auto")
+        prev_start = prev_end = curr_start = curr_end = None
+        if range_mode == "manual":
+            if "prev_start" not in st.session_state:
+                p0, p1 = prev_month_range(asof)
+                st.session_state["prev_start"] = p0
+                st.session_state["prev_end"] = p1
+            if "curr_start" not in st.session_state:
+                c0 = month_start(asof)
+                st.session_state["curr_start"] = c0
+                st.session_state["curr_end"] = c0
+
+            st.caption("전월/당월 비교 기간을 각각 선택하세요.")
+            prev_start = st.date_input("전월 시작", key="prev_start")
+            prev_end = st.date_input("전월 종료", key="prev_end")
+            curr_start = st.date_input("당월 시작", key="curr_start")
+            curr_end = st.date_input("당월 종료", key="curr_end")
 
     if prod_df.empty:
         st.info("생산실적 데이터가 없습니다.")
     else:
-        views = build_cutoff_views(prod_df, asof=asof)
-        st.caption(f"기준일: {views.asof.isoformat()} / 집계 cutoff: {views.cutoff.isoformat()}")
+        views = build_views_with_ranges(
+            prod_df,
+            asof=asof,
+            prev_start=prev_start,
+            prev_end=prev_end,
+            curr_start=curr_start,
+            curr_end=curr_end,
+        )
+        st.caption(f"기준일: {views.asof.isoformat()} / 집계 cutoff(당일 제외): {views.cutoff.isoformat()}")
 
         def _sum_qty(df: pd.DataFrame) -> int:
             if df.empty:
                 return 0
             return int(pd.to_numeric(df[PROD_COLS.생산수량], errors="coerce").fillna(0).sum())
+
+        def _sum_final(df: pd.DataFrame, *, final_proc: str) -> int:
+            if df.empty:
+                return 0
+            mask = df[PROD_COLS.공정].astype(str).str.contains(final_proc, na=False)
+            return _sum_qty(df[mask].copy())
 
         def _n_days(df: pd.DataFrame) -> int:
             if df.empty:
@@ -142,20 +190,47 @@ with tabs[0]:
                 return 0
             return int(df[PROD_COLS.품목코드].nunique())
 
-        prev_total = _sum_qty(views.prev_month.df)
-        curr_total = _sum_qty(views.curr_month.df)
+        final_proc = "누수"
+        prev_total = _sum_final(views.prev_month.df, final_proc=final_proc)
+        curr_total = _sum_final(views.curr_month.df, final_proc=final_proc)
+        prev_all = _sum_qty(views.prev_month.df)
+        curr_all = _sum_qty(views.curr_month.df)
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("전월 생산수량", f"{prev_total:,}")
-        m2.metric("당월 생산수량(MTD)", f"{curr_total:,}")
+        m1.metric("전월 생산수량(누수)", f"{prev_total:,}")
+        m2.metric("당월 생산수량(누수/MTD)", f"{curr_total:,}")
         m3.metric("당월 생산일수", f"{_n_days(views.curr_month.df):,}")
         m4.metric("당월 품목수", f"{_n_items(views.curr_month.df):,}")
+        st.caption(f"참고(전체 공정 합계) 전월: {prev_all:,} / 당월: {curr_all:,}")
 
         left, right = st.columns(2)
 
+        process_order = ["사출", "분리", "하이드", "접착", "누수"]
+
+        def _process_view(df: pd.DataFrame) -> pd.DataFrame:
+            s = summarize_by_process(df)
+            if s.empty:
+                return s
+            s2 = s.copy()
+            known = s2[PROD_COLS.공정].astype(str).isin(process_order)
+            other_qty = int(s2.loc[~known, PROD_COLS.생산수량].sum()) if (~known).any() else 0
+            s2 = s2[known].copy()
+            s2[PROD_COLS.공정] = pd.Categorical(s2[PROD_COLS.공정].astype(str), categories=process_order, ordered=True)
+            s2 = s2.sort_values(PROD_COLS.공정).copy()
+            s2[PROD_COLS.생산수량] = s2[PROD_COLS.생산수량].astype(int)
+            if other_qty > 0:
+                s2 = pd.concat(
+                    [
+                        s2,
+                        pd.DataFrame({PROD_COLS.공정: ["기타"], PROD_COLS.생산수량: [other_qty]}),
+                    ],
+                    ignore_index=True,
+                )
+            return s2.reset_index(drop=True)
+
         with left:
             st.markdown(f"**전월 ({views.prev_month.start.isoformat()} ~ {views.prev_month.end.isoformat()})**")
-            prev_proc = summarize_by_process(views.prev_month.df)
+            prev_proc = _process_view(views.prev_month.df)
             if prev_proc.empty:
                 st.info("전월 실적이 없습니다(집계 기준/데이터를 확인하세요).")
             else:
@@ -167,16 +242,18 @@ with tabs[0]:
             if views.curr_month.end < views.curr_month.start:
                 st.info("당월은 아직 집계 대상이 없습니다(기준일이 월초이거나, cutoff가 월 시작 이전).")
             else:
-                curr_proc = summarize_by_process(views.curr_month.df)
+                curr_proc = _process_view(views.curr_month.df)
                 if curr_proc.empty:
                     st.info("당월 실적이 없습니다(당일 제외/데이터를 확인하세요).")
                 else:
                     st.bar_chart(curr_proc.set_index(PROD_COLS.공정)[PROD_COLS.생산수량])
                     st.dataframe(curr_proc, use_container_width=True, hide_index=True)
 
-                daily = summarize_daily_total(views.curr_month.df)
+                daily = summarize_daily_total(
+                    views.curr_month.df[views.curr_month.df[PROD_COLS.공정].astype(str).str.contains(final_proc, na=False)].copy()
+                )
                 if not daily.empty:
-                    st.markdown("**당월 일자별 합계**")
+                    st.markdown("**당월 일자별 합계(누수)**")
                     st.line_chart(daily.set_index(PROD_COLS.생산일자)[PROD_COLS.생산수량])
 
         with st.expander("원천 데이터 보기(전월+당월, cutoff 반영)"):
