@@ -11,6 +11,7 @@ from risk_dashboard.io import default_data_paths, load_production_actuals
 from risk_dashboard.logging_utils import get_logger
 from risk_dashboard.production import month_end, month_start, prev_month_range
 from risk_dashboard.production import build_views_with_ranges
+from risk_dashboard.master_products import filter_sgwan, load_master_table
 from risk_dashboard.schema import PROD_COLS, PROD_REQUIRED_COLS
 
 
@@ -97,6 +98,55 @@ def _excel_upload_time_kst(path: Path) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
+def load_order_status_sgwan(
+    order_xlsx: str,
+    master_xlsx: str,
+    *,
+    sheet_name: str = "data",
+    header_row_1based: int = 2,
+    item_name_col: str = "품명",
+    master_name_col: str = "제품명",
+    cache_bust: float | None = None,
+) -> pd.DataFrame:
+    _ = cache_bust
+    op = Path(order_xlsx)
+    mp = Path(master_xlsx)
+    if not op.exists():
+        raise FileNotFoundError(str(op))
+    if not mp.exists():
+        raise FileNotFoundError(str(mp))
+
+    raw = pd.read_excel(op, sheet_name=sheet_name, header=None)  # type: ignore[call-arg]
+    if raw.empty:
+        return pd.DataFrame()
+    header_idx = max(0, header_row_1based - 1)
+    if header_idx >= len(raw):
+        raise ValueError(f"header_row out of range: {header_row_1based} (rows={len(raw)})")
+    header = raw.iloc[header_idx].tolist()
+    df = raw.iloc[header_idx + 1 :].copy()
+    df.columns = [str(c).strip() for c in header]
+    df = df.dropna(axis=1, how="all").copy()
+
+    if item_name_col not in df.columns:
+        raise ValueError(f"입력에 품명 컬럼이 없습니다: {item_name_col} (컬럼={list(df.columns)})")
+
+    mdf = load_master_table(mp)
+    mdf_s = filter_sgwan(mdf)
+    if master_name_col not in mdf_s.columns:
+        raise ValueError(f"마스터에 제품명 컬럼이 없습니다: {master_name_col} (컬럼={list(mdf_s.columns)})")
+
+    master_names = {_norm_text(x) for x in mdf_s[master_name_col].tolist() if _norm_text(x)}
+    if not master_names:
+        return pd.DataFrame()
+
+    df2 = df.copy()
+    df2["_품명_norm"] = df2[item_name_col].map(_norm_text)
+    out = df2[df2["_품명_norm"].isin(master_names)].copy()
+    out = out.drop(columns=["_품명_norm"], errors="ignore")
+    return out
+
+
+@st.cache_data(show_spinner=False)
 def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: float | None = None) -> pd.DataFrame:
     # cache_bust: 파일 수정시간 등을 넘겨 캐시가 파일 변경을 감지하도록 함.
     _ = cache_bust
@@ -161,6 +211,10 @@ with st.sidebar:
         prod_xlsx = st.text_input("생산실적(간편)", value=str(default_excel))
         st.caption("엑셀 파일이 리포지토리(같은 폴더)에 있으면 바로 동작합니다.")
 
+    with st.expander("수주현황 데이터", expanded=False):
+        order_xlsx = st.text_input("수주현황(품목) 엑셀", value="order_status_by_item_filtered.xlsx")
+        master_xlsx = st.text_input("S관 제품 마스터", value="S관 생산 제품 리스트.xlsx")
+
 if source == "CSV":
     logger.info("source=CSV | prod=%s", prod_path)
     try:
@@ -198,7 +252,7 @@ prod_df = _normalize_process_names(prod_df)
 with st.sidebar:
     asof = st.date_input("기준일", value=date.today())
 
-tabs = st.tabs(["S관 실적"])
+tabs = st.tabs(["S관 실적", "S관 수주현황"])
 
 with tabs[0]:
     st.subheader("S관 생산실적 현황(간편)")
@@ -496,3 +550,72 @@ with tabs[0]:
             )
 
         # 원천 데이터 보기 제거(요청사항)
+
+with tabs[1]:
+    st.subheader("S관 수주현황(월별 집계)")
+    st.caption("order_status_by_item_filtered.xlsx의 품명을 S관 제품 마스터(제품명)와 매칭한 행만 집계합니다.")
+
+    try:
+        order_mtime = Path(order_xlsx).stat().st_mtime if Path(order_xlsx).exists() else None
+        orders_s = load_order_status_sgwan(
+            order_xlsx,
+            master_xlsx,
+            cache_bust=order_mtime,
+        )
+    except Exception as e:
+        st.error(f"수주현황 로드 실패: {e}")
+        orders_s = pd.DataFrame()
+
+    if orders_s.empty:
+        st.info("S관 수주현황 데이터가 없습니다(매칭 결과 0행이거나 파일/컬럼을 확인하세요).")
+    else:
+        # normalize/parse columns
+        month_col = "__month_date__" if "__month_date__" in orders_s.columns else "월"
+        qty_col = "오더수량" if "오더수량" in orders_s.columns else None
+        amt_col = "수주금액(원)" if "수주금액(원)" in orders_s.columns else None
+
+        df = orders_s.copy()
+        if month_col == "__month_date__":
+            m = pd.to_datetime(df[month_col], errors="coerce")
+            df["_월"] = m.dt.to_period("M").dt.to_timestamp()
+        else:
+            df["_월"] = df[month_col].astype("string")
+
+        if qty_col:
+            df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
+        if amt_col:
+            df[amt_col] = pd.to_numeric(df[amt_col], errors="coerce").fillna(0)
+
+        group_cols = ["_월"]
+        if "구분" in df.columns:
+            show_by_type = st.toggle("구분별로 보기", value=True)
+            if show_by_type:
+                group_cols.append("구분")
+
+        agg = {}
+        if qty_col:
+            agg[qty_col] = "sum"
+        if amt_col:
+            agg[amt_col] = "sum"
+        agg_rows = df.groupby(group_cols, dropna=False).agg(agg).reset_index()
+
+        if month_col == "__month_date__":
+            agg_rows["_월"] = pd.to_datetime(agg_rows["_월"], errors="coerce").dt.strftime("%Y-%m")
+        agg_rows = agg_rows.rename(columns={"_월": "월"})
+
+        # display
+        st.dataframe(
+            agg_rows.style.format(
+                {
+                    (qty_col or "오더수량"): "{:,.0f}",
+                    (amt_col or "수주금액(원)"): "{:,.0f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # charts (월 합계)
+        if "월" in agg_rows.columns and qty_col and len(group_cols) == 1:
+            chart_df = agg_rows.set_index("월")[[qty_col]].copy()
+            st.line_chart(chart_df)
