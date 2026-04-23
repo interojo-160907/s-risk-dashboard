@@ -71,6 +71,31 @@ def _map_process(code: object) -> str:
     return s
 
 
+def _excel_upload_time_kst(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        import openpyxl  # type: ignore[import-not-found]
+
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        dt = wb.properties.modified or wb.properties.created
+        wb.close()
+        if dt is None:
+            return None
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        else:
+            dt = dt.astimezone(ZoneInfo("Asia/Seoul"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        # fallback (may reflect deploy/copy time on some environments)
+        try:
+            dt = datetime.fromtimestamp(path.stat().st_mtime, tz=ZoneInfo("Asia/Seoul"))
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+
 @st.cache_data(show_spinner=False)
 def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: float | None = None) -> pd.DataFrame:
     # cache_bust: 파일 수정시간 등을 넘겨 캐시가 파일 변경을 감지하도록 함.
@@ -185,13 +210,10 @@ with tabs[0]:
         cutoff = asof - timedelta(days=1)
 
         # 업로드(원천 엑셀 파일 수정시간 기준) 표시
-        try:
-            excel_path = Path(prod_xlsx)
-            if excel_path.exists():
-                dt = datetime.fromtimestamp(excel_path.stat().st_mtime, tz=ZoneInfo("Asia/Seoul"))
-                st.caption(f"생산실적 업로드 시간 : {dt.strftime('%Y-%m-%d %H:%M:%S')} (한국시간)")
-        except Exception:
-            pass
+        excel_path = Path(prod_xlsx)
+        uploaded_at = _excel_upload_time_kst(excel_path)
+        if uploaded_at:
+            st.caption(f"생산실적 업로드 시간 : {uploaded_at} (한국시간)")
 
         # 전월/당월은 월 단위 고정(당월은 cutoff=전일까지만)
         prev_start, prev_end = prev_month_range(asof)
@@ -301,7 +323,7 @@ with tabs[0]:
 
         def _category_final_and_comp_yield(df: pd.DataFrame, *, asof: date) -> pd.DataFrame:
             if df.empty or PROD_COLS.신규분류요약 not in df.columns:
-                return pd.DataFrame(columns=[PROD_COLS.신규분류요약, "생산수량", "양품수량", "수율"])
+                return pd.DataFrame(columns=[PROD_COLS.신규분류요약, "생산수량", "양품수량", "종합수율"])
 
             gross_col = PROD_COLS.생산수량
             good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
@@ -311,7 +333,7 @@ with tabs[0]:
             base[PROD_COLS.신규분류요약] = base[PROD_COLS.신규분류요약].map(_norm_text)
             base = base[base[PROD_COLS.신규분류요약].astype(str).str.len() > 0].copy()
             if base.empty:
-                return pd.DataFrame(columns=[PROD_COLS.신규분류요약, "생산수량", "양품수량", "수율"])
+                return pd.DataFrame(columns=[PROD_COLS.신규분류요약, "생산수량", "양품수량", "종합수율"])
 
             # final quantities (누수/규격검사 기준)
             final_df = base[base[PROD_COLS.공정].astype(str) == final_proc].copy()
@@ -342,28 +364,26 @@ with tabs[0]:
 
             comp_vals: dict[str, float] = {}
             for cat, row in yield_map.iterrows():
-                ys = []
-                ok = True
+                ys: list[float] = []
                 for proc in process_order:
                     y = row.get(proc)
                     if y is None or pd.isna(y):
-                        ok = False
-                        break
+                        continue
                     ys.append(float(y))
-                if not ok:
+                if not ys:
                     continue
                 prod_val = 1.0
                 for y in ys:
                     prod_val *= y
                 comp_vals[str(cat)] = float(prod_val)
 
-            comp_series = pd.Series(comp_vals, name="수율")
+            comp_series = pd.Series(comp_vals, name="종합수율")
 
             out = final_sum.join(comp_series, how="left").reset_index()
             out["생산수량"] = pd.to_numeric(out["생산수량"], errors="coerce").fillna(0).astype(int)
             out["양품수량"] = pd.to_numeric(out["양품수량"], errors="coerce").fillna(0).astype(int)
             out = out.sort_values("양품수량", ascending=False).reset_index(drop=True)
-            return out[[PROD_COLS.신규분류요약, "생산수량", "양품수량", "수율"]].copy()
+            return out[[PROD_COLS.신규분류요약, "생산수량", "양품수량", "종합수율"]].copy()
 
         def _forecast_eom_output_mtd(df: pd.DataFrame, *, asof: date) -> int | None:
             # Forecast end-of-month output using final-process good qty MTD.
@@ -420,13 +440,13 @@ with tabs[0]:
                 hide_index=True,
             )
 
-            st.markdown("**신규분류요약별(누수/규격검사 기준)**")
+            st.markdown("**신규분류요약별**")
             prev_cat = _category_final_and_comp_yield(views.prev_month.df, asof=asof)
             if prev_cat.empty:
                 st.info("신규분류요약 데이터가 없어 그룹 요약을 표시할 수 없습니다.")
             else:
                 st.dataframe(
-                    prev_cat.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                    prev_cat.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "종합수율": "{:.1%}"}),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -456,13 +476,13 @@ with tabs[0]:
                 hide_index=True,
             )
 
-            st.markdown("**신규분류요약별(누수/규격검사 기준)**")
+            st.markdown("**신규분류요약별**")
             curr_cat = _category_final_and_comp_yield(views.curr_month.df, asof=asof)
             if curr_cat.empty:
                 st.info("신규분류요약 데이터가 없어 그룹 요약을 표시할 수 없습니다.")
             else:
                 st.dataframe(
-                    curr_cat.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                    curr_cat.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "종합수율": "{:.1%}"}),
                     use_container_width=True,
                     hide_index=True,
                 )
