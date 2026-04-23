@@ -12,6 +12,11 @@ def month_start(d: date) -> date:
     return date(d.year, d.month, 1)
 
 
+def month_end(d: date) -> date:
+    next_start = add_months(month_start(d), 1)
+    return next_start - timedelta(days=1)
+
+
 def add_months(d: date, months: int) -> date:
     y = d.year + (d.month - 1 + months) // 12
     m = (d.month - 1 + months) % 12 + 1

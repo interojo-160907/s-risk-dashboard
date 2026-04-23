@@ -9,7 +9,7 @@ import streamlit as st
 
 from risk_dashboard.io import default_data_paths, load_production_actuals
 from risk_dashboard.logging_utils import get_logger
-from risk_dashboard.production import month_start, prev_month_range
+from risk_dashboard.production import month_end, month_start, prev_month_range
 from risk_dashboard.production import build_views_with_ranges
 from risk_dashboard.schema import PROD_COLS, PROD_REQUIRED_COLS
 
@@ -24,6 +24,14 @@ st.markdown(
     """
 <style>
   .stApp { background: #f7f2ea; }
+  /* 상단 헤더 색상(다른 대시보드처럼) */
+  header[data-testid="stHeader"] {
+    background: linear-gradient(90deg, rgba(27,94,32,0.18) 0%, rgba(247,242,234,0.0) 55%);
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+  }
+  /* 상단 우측 툴바/메뉴 배경도 투명 처리 */
+  div[data-testid="stToolbar"] { background: transparent; }
+  div[data-testid="stDecoration"] { background: transparent; }
   /* pills/segment buttons 느낌 */
   .stButton > button { border-radius: 999px; padding: 0.28rem 0.9rem; border: 1px solid rgba(0,0,0,0.18); background: #fff; }
   .stButton > button:hover { border-color: rgba(0,0,0,0.35); }
@@ -288,6 +296,45 @@ with tabs[0]:
 
             return total_output, comp
 
+        def _forecast_eom_output_mtd(df: pd.DataFrame, *, asof: date) -> int | None:
+            # Forecast end-of-month output using final-process good qty MTD.
+            # - MTD uses cutoff (asof-1) already in views.curr_month.df
+            # - average per observed production day (final process) * estimated remaining production days
+            if df.empty:
+                return None
+
+            gross_col = PROD_COLS.생산수량
+            good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
+            final_proc = "누수/규격검사"
+
+            cutoff_local = asof - timedelta(days=1)
+            ms = month_start(asof)
+            me = month_end(asof)
+            if cutoff_local < ms:
+                return 0
+
+            final_df = df[df[PROD_COLS.공정].astype(str) == final_proc].copy()
+            if final_df.empty:
+                return 0
+
+            mtd_qty = int(pd.to_numeric(final_df[good_col], errors="coerce").fillna(0).sum())
+            prod_days = int(pd.to_datetime(final_df[PROD_COLS.생산일자], errors="coerce").dt.date.nunique())
+            if prod_days <= 0:
+                return None
+
+            avg_per_day = mtd_qty / prod_days
+
+            elapsed_days = (cutoff_local - ms).days + 1
+            if elapsed_days <= 0:
+                return None
+
+            # Estimate remaining production days by observed ratio of production-days to elapsed calendar-days.
+            prod_day_ratio = min(1.0, max(0.0, prod_days / elapsed_days))
+            remaining_days = max(0, (me - cutoff_local).days)
+            remaining_prod_days_est = int(round(remaining_days * prod_day_ratio))
+            forecast = int(round(mtd_qty + avg_per_day * remaining_prod_days_est))
+            return forecast
+
         with left_card:
             st.markdown("**전월**")
             st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
@@ -295,9 +342,10 @@ with tabs[0]:
             st.markdown("**공정별 요약**")
             prev_proc = _process_summary(views.prev_month.df)
             prev_total, prev_comp = _total_output_and_yield(views.prev_month.df)
-            k1, k2 = st.columns(2)
+            k1, k2, k3 = st.columns(3)
             k1.metric("총 생산실적(누수/규격검사 양품)", f"{prev_total:,}")
             k2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
+            k3.metric("월말 예상(누수/규격검사 양품)", f"{prev_total:,}")
             st.dataframe(
                 prev_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                 use_container_width=True,
@@ -318,9 +366,11 @@ with tabs[0]:
             st.markdown("**공정별 요약**")
             curr_proc = _process_summary(views.curr_month.df)
             curr_total, curr_comp = _total_output_and_yield(views.curr_month.df)
-            k1, k2 = st.columns(2)
+            k1, k2, k3 = st.columns(3)
             k1.metric("총 생산실적(누수/규격검사 양품)", f"{curr_total:,}")
             k2.metric("종합 수율", f"{curr_comp*100:.1f}%" if curr_comp is not None else "-")
+            curr_forecast = _forecast_eom_output_mtd(views.curr_month.df, asof=asof)
+            k3.metric("월말 예상(누수/규격검사 양품)", f"{curr_forecast:,}" if curr_forecast is not None else "-")
             st.dataframe(
                 curr_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                 use_container_width=True,
