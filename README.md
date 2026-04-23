@@ -69,6 +69,14 @@ python .\scripts\ingest_production_actuals_sgwan_simple.py
 
 참고: 대시보드의 `S관 실적` 탭은 **기준일(사이드바 선택) 당일 실적을 제외**하고, `기준일-1(전일)`까지 집계합니다(당일은 생산 중일 수 있음).
 
+### order_status_by_item_filtered.xlsx에서 S관 제품만 추출
+
+`order_status_by_item_filtered.xlsx`의 `품명`을 `S관 생산 제품 리스트.xlsx`의 `제품명`과 매칭해서, S관 생산 제품 행만 `data/order_status_by_item_filtered_sgwan.csv`로 생성합니다.
+
+```powershell
+python .\scripts\ingest_order_status_by_item_filtered_sgwan.py
+```
+
 ## GitHub에 올리기(로컬 → 원격)
 
 엑셀 원본은 용량/보안 이슈가 있을 수 있어 **코드만 먼저 업로드**를 권장합니다(`~$*.xlsx`는 자동 제외).
