@@ -98,6 +98,21 @@ def _excel_upload_time_kst(path: Path) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
+def _excel_sheet_names(path: str, *, cache_bust: float | None = None) -> list[str]:
+    _ = cache_bust
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(str(p))
+    import openpyxl  # type: ignore[import-not-found]
+
+    wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
+
+
+@st.cache_data(show_spinner=False)
 def load_order_status_sgwan(
     order_xlsx: str,
     master_xlsx: str,
@@ -249,7 +264,24 @@ with st.sidebar:
 
     with st.expander("수주현황 데이터", expanded=False):
         order_book_xlsx = st.text_input("수주현황 포함 엑셀", value=str(default_excel))
-        order_sheet = st.text_input("수주현황 시트명", value="수주현황")
+        if st.button("수주현황 시트 새로고침"):
+            st.cache_data.clear()
+            st.rerun()
+        try:
+            sheet_names = _excel_sheet_names(
+                order_book_xlsx,
+                cache_bust=(Path(order_book_xlsx).stat().st_mtime if Path(order_book_xlsx).exists() else None),
+            )
+        except Exception as e:
+            sheet_names = []
+            st.error(f"수주현황 엑셀 시트 목록을 읽지 못했습니다: {e}")
+        if sheet_names:
+            prefer = ["수주현황", "수주 현황", "수주"]
+            default_sheet = next((s for s in prefer if s in sheet_names), sheet_names[0])
+            order_sheet = st.selectbox("수주현황 시트", options=sheet_names, index=sheet_names.index(default_sheet))
+        else:
+            st.info("엑셀에 '수주현황' 시트를 저장/업로드한 뒤 다시 확인하세요.")
+            order_sheet = None
         master_xlsx = st.text_input("S관 제품 마스터", value="S관 생산 제품 리스트.xlsx")
 
 if source == "CSV":
@@ -591,6 +623,10 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("S관 수주현황(월별 집계)")
     st.caption("수주현황 시트의 품명을 S관 제품 마스터(제품명)와 매칭한 행만 집계합니다.")
+
+    if not order_sheet:
+        st.warning("수주현황 시트를 선택할 수 없습니다. '생산실적현황(간편)_S관.xlsx'에 '수주현황' 시트를 저장/업로드한 뒤, 사이드바에서 시트를 선택해주세요.")
+        st.stop()
 
     try:
         order_mtime = Path(order_book_xlsx).stat().st_mtime if Path(order_book_xlsx).exists() else None
