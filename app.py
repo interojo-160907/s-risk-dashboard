@@ -316,13 +316,9 @@ with tabs[0]:
             return total_output, comp
 
         with left_card:
-            h1, h2, h3 = st.columns([3, 2, 1], vertical_alignment="center")
-            with h1:
-                st.markdown("**전월**")
-            with h2:
-                st.write("")
-            with h3:
-                st.write("")
+            st.markdown("**전월**")
+            # 당월 카드에만 필터가 있어 높이가 늘어나므로, 전월 카드에 동일 높이 spacer를 둬서 정렬을 맞춤
+            st.markdown("<div style='height: 2.2rem'></div>", unsafe_allow_html=True)
             st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
 
             st.markdown("**공정별 요약**")
