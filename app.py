@@ -204,6 +204,25 @@ with tabs[0]:
 
         process_order = ["사출조립", "분리", "하이드레이션/전면검", "접착/멸균", "누수/규격검사"]
 
+        def _process_summary(df: pd.DataFrame) -> pd.DataFrame:
+            if df.empty:
+                return pd.DataFrame(columns=[PROD_COLS.공정, "생산수량", "양품수량", "수율"])
+
+            gross_col = PROD_COLS.생산수량
+            good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
+            g = (
+                df.groupby(PROD_COLS.공정, dropna=False)[[gross_col, good_col]]
+                .sum()
+                .reset_index()
+                .rename(columns={gross_col: "생산수량", good_col: "양품수량"})
+            )
+            g[PROD_COLS.공정] = pd.Categorical(g[PROD_COLS.공정].astype(str), categories=process_order, ordered=True)
+            g = g.sort_values(PROD_COLS.공정).copy()
+            g["생산수량"] = pd.to_numeric(g["생산수량"], errors="coerce").fillna(0).astype(int)
+            g["양품수량"] = pd.to_numeric(g["양품수량"], errors="coerce").fillna(0).astype(int)
+            g["수율"] = g.apply(lambda r: (r["양품수량"] / r["생산수량"]) if r["생산수량"] > 0 else None, axis=1)
+            return g.reset_index(drop=True)
+
         def _daily_process_summary(df: pd.DataFrame) -> pd.DataFrame:
             if df.empty:
                 return pd.DataFrame(columns=[PROD_COLS.생산일자, PROD_COLS.공정, "생산수량", "양품수량"])
@@ -228,6 +247,12 @@ with tabs[0]:
             with st.container(border=True):
                 st.markdown("**전월**")
                 st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
+
+                st.markdown("**공정별 요약**")
+                prev_proc = _process_summary(views.prev_month.df)
+                st.dataframe(prev_proc, use_container_width=True, hide_index=True)
+
+                st.markdown("**일자별 집계**")
                 prev_daily = _daily_process_summary(views.prev_month.df)
                 st.dataframe(prev_daily, use_container_width=True, hide_index=True)
 
@@ -235,6 +260,12 @@ with tabs[0]:
             with st.container(border=True):
                 st.markdown("**당월**")
                 st.caption(f"생산일수: {_n_days(views.curr_month.df):,} / 품목수: {_n_items(views.curr_month.df):,}")
+
+                st.markdown("**공정별 요약**")
+                curr_proc = _process_summary(views.curr_month.df)
+                st.dataframe(curr_proc, use_container_width=True, hide_index=True)
+
+                st.markdown("**일자별 집계**")
                 curr_daily = _daily_process_summary(views.curr_month.df)
                 st.dataframe(curr_daily, use_container_width=True, hide_index=True)
 
