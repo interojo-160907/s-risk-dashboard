@@ -14,7 +14,7 @@ from risk_dashboard.production import build_views_with_ranges
 from risk_dashboard.schema import PROD_COLS, PROD_REQUIRED_COLS
 
 
-st.set_page_config(page_title="S관 생산실적 대시보드", layout="wide")
+st.set_page_config(page_title="S관 생산실적 대시보드", layout="wide", initial_sidebar_state="collapsed")
 st.title("S관 생산실적 대시보드")
 
 paths = default_data_paths("data")
@@ -36,6 +36,8 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+# 기본 사이드바 접기
 
 
 def _norm_text(x: object) -> str:
@@ -161,7 +163,7 @@ tabs = st.tabs(["S관 실적"])
 
 with tabs[0]:
     st.subheader("S관 생산실적 현황(간편)")
-    st.caption("컨셉: 전월 vs 당월(MTD, 기준일-1까지 / 당일 제외)")
+    # 컨셉 문구는 숨김(요청사항)
 
     if prod_df.empty:
         st.info("생산실적 데이터가 없습니다.")
@@ -169,12 +171,12 @@ with tabs[0]:
         cutoff = asof - timedelta(days=1)
         st.caption(f"기준일: {asof.isoformat()} / 집계 cutoff(당일 제외): {cutoff.isoformat()}")
 
-        # 업데이트 시간(파일 수정시간 기준)
+        # 업로드(원천 엑셀 파일 수정시간 기준) 표시
         try:
-            src_path = Path(prod_xlsx) if source == "엑셀" else Path(prod_path)
-            if src_path.exists():
-                dt = datetime.fromtimestamp(src_path.stat().st_mtime, tz=ZoneInfo("Asia/Seoul"))
-                st.caption(f"업데이트(파일 수정시간): {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            excel_path = Path(prod_xlsx)
+            if excel_path.exists():
+                dt = datetime.fromtimestamp(excel_path.stat().st_mtime, tz=ZoneInfo("Asia/Seoul"))
+                st.caption(f"업로드 시간(원천 엑셀 수정시간): {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         except Exception:
             pass
 
@@ -319,9 +321,4 @@ with tabs[0]:
                     hide_index=True,
                 )
 
-        with st.expander("원천 데이터 보기(전월+당월, cutoff 반영)"):
-            st.dataframe(
-                pd.concat([views.prev_month.df, views.curr_month.df], ignore_index=True)
-                .sort_values([PROD_COLS.생산일자, PROD_COLS.공정, PROD_COLS.품목코드]),
-                use_container_width=True,
-            )
+        # 원천 데이터 보기 제거(요청사항)
