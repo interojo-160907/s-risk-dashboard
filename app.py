@@ -182,7 +182,7 @@ with tabs[0]:
         except Exception:
             pass
 
-        # 전월은 월 단위 고정, 당월만 기간 필터(전체 / 직접 선택)
+        # 전월/당월은 월 단위 고정(당월은 cutoff=전일까지만)
         prev_start, prev_end = prev_month_range(asof)
         curr_start_default = month_start(asof)
         curr_end_default = cutoff
@@ -194,41 +194,14 @@ with tabs[0]:
             left_card = st.container(border=True)
 
         with right_card:
-            h1, h2, h3 = st.columns([3, 2, 1], vertical_alignment="center")
-            with h1:
-                st.markdown("**당월**")
-            with h2:
-                curr_filter_mode = st.segmented_control(
-                    "당월 기간",
-                    options=["전체", "직접(며칠~며칠)"],
-                    default=st.session_state.get("curr_filter_mode", "전체"),
-                    label_visibility="collapsed",
-                )
-                st.session_state["curr_filter_mode"] = curr_filter_mode
-            with h3:
-                with st.popover("기간"):
-                    st.caption("※ '직접' 선택 시만 적용됩니다.")
-                    st.date_input("당월 시작", value=curr_start_default, key="curr_start_filter")
-                    st.date_input("당월 종료", value=curr_end_default, key="curr_end_filter")
+            st.markdown("**당월**")
 
         curr_start = curr_start_default
         curr_end = curr_end_default
-        if str(curr_filter_mode).startswith("직접"):
-            curr_start = st.session_state.get("curr_start_filter", curr_start_default)
-            curr_end = st.session_state.get("curr_end_filter", curr_end_default)
-
-            if curr_end > cutoff:
-                curr_end = cutoff
-            if curr_start < curr_start_default:
-                curr_start = curr_start_default
-            if curr_start > curr_end:
-                st.warning("당월 기간이 올바르지 않습니다(시작일 > 종료일).")
 
         # 전월/당월 범위 집계
         # - 전월: 월 전체
-        # - 당월: 선택된 범위(기본=전체 MTD, cutoff까지)
-        curr_start = curr_start if curr_start <= curr_end else curr_start_default
-        curr_end = curr_end if curr_start <= curr_end else curr_end_default
+        # - 당월: 월 시작 ~ cutoff(전일) 고정
 
         views = build_views_with_ranges(
             prod_df,
@@ -317,8 +290,6 @@ with tabs[0]:
 
         with left_card:
             st.markdown("**전월**")
-            # 당월 카드에만 필터가 있어 높이가 늘어나므로, 전월 카드에 동일 높이 spacer를 둬서 정렬을 맞춤
-            st.markdown("<div style='height: 2.2rem'></div>", unsafe_allow_html=True)
             st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
 
             st.markdown("**공정별 요약**")
