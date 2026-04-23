@@ -136,14 +136,50 @@ def load_order_status_sgwan(
         raise ValueError(f"마스터에 제품명 컬럼이 없습니다: {master_name_col} (컬럼={list(mdf_s.columns)})")
 
     master_names = {_norm_text(x) for x in mdf_s[master_name_col].tolist() if _norm_text(x)}
+    summary_col = "분류요약" if "분류요약" in mdf_s.columns else None
+    master_summary_map: dict[str, str] = {}
+    if summary_col:
+        for _, row in mdf_s[[master_name_col, summary_col]].iterrows():
+            n = _norm_text(row.get(master_name_col))
+            s = _norm_text(row.get(summary_col))
+            if n and n not in master_summary_map:
+                master_summary_map[n] = s
     if not master_names:
         return pd.DataFrame()
 
     df2 = df.copy()
     df2["_품명_norm"] = df2[item_name_col].map(_norm_text)
     out = df2[df2["_품명_norm"].isin(master_names)].copy()
+    if master_summary_map:
+        out["분류요약"] = out["_품명_norm"].map(master_summary_map).fillna("")
     out = out.drop(columns=["_품명_norm"], errors="ignore")
     return out
+
+
+@st.cache_data(show_spinner=False)
+def load_order_status_raw(
+    order_xlsx: str,
+    *,
+    sheet_name: str = "data",
+    header_row_1based: int = 2,
+    cache_bust: float | None = None,
+) -> pd.DataFrame:
+    _ = cache_bust
+    op = Path(order_xlsx)
+    if not op.exists():
+        raise FileNotFoundError(str(op))
+
+    raw = pd.read_excel(op, sheet_name=sheet_name, header=None)  # type: ignore[call-arg]
+    if raw.empty:
+        return pd.DataFrame()
+    header_idx = max(0, header_row_1based - 1)
+    if header_idx >= len(raw):
+        raise ValueError(f"header_row out of range: {header_row_1based} (rows={len(raw)})")
+    header = raw.iloc[header_idx].tolist()
+    df = raw.iloc[header_idx + 1 :].copy()
+    df.columns = [str(c).strip() for c in header]
+    df = df.dropna(axis=1, how="all").copy()
+    return df
 
 
 @st.cache_data(show_spinner=False)
@@ -212,7 +248,8 @@ with st.sidebar:
         st.caption("엑셀 파일이 리포지토리(같은 폴더)에 있으면 바로 동작합니다.")
 
     with st.expander("수주현황 데이터", expanded=False):
-        order_xlsx = st.text_input("수주현황(품목) 엑셀", value="order_status_by_item_filtered.xlsx")
+        order_book_xlsx = st.text_input("수주현황 포함 엑셀", value=str(default_excel))
+        order_sheet = st.text_input("수주현황 시트명", value="수주현황")
         master_xlsx = st.text_input("S관 제품 마스터", value="S관 생산 제품 리스트.xlsx")
 
 if source == "CSV":
@@ -553,22 +590,37 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("S관 수주현황(월별 집계)")
-    st.caption("order_status_by_item_filtered.xlsx의 품명을 S관 제품 마스터(제품명)와 매칭한 행만 집계합니다.")
+    st.caption("수주현황 시트의 품명을 S관 제품 마스터(제품명)와 매칭한 행만 집계합니다.")
 
     try:
-        order_mtime = Path(order_xlsx).stat().st_mtime if Path(order_xlsx).exists() else None
+        order_mtime = Path(order_book_xlsx).stat().st_mtime if Path(order_book_xlsx).exists() else None
+        orders_raw = load_order_status_raw(order_book_xlsx, sheet_name=order_sheet, cache_bust=order_mtime)
         orders_s = load_order_status_sgwan(
-            order_xlsx,
+            order_book_xlsx,
             master_xlsx,
+            sheet_name=order_sheet,
             cache_bust=order_mtime,
         )
     except Exception as e:
         st.error(f"수주현황 로드 실패: {e}")
+        orders_raw = pd.DataFrame()
         orders_s = pd.DataFrame()
 
     if orders_s.empty:
-        st.info("S관 수주현황 데이터가 없습니다(매칭 결과 0행이거나 파일/컬럼을 확인하세요).")
+        # If raw exists but filtered is empty, most likely sheet/headers mismatch or master matching fails.
+        msg = "S관 수주현황 데이터가 없습니다(매칭 결과 0행이거나 파일/시트/컬럼을 확인하세요)."
+        try:
+            p = Path(order_book_xlsx)
+            if p.exists():
+                xl = pd.ExcelFile(p)
+                if order_sheet not in xl.sheet_names:
+                    msg = f"'{order_sheet}' 시트가 없습니다. 현재 시트: {xl.sheet_names}"
+        except Exception:
+            pass
+        st.info(msg)
     else:
+        if not orders_raw.empty:
+            st.caption(f"S관 제품 매칭 행수: {len(orders_s):,} / 전체 행수: {len(orders_raw):,}")
         df = orders_s.copy()
 
         # Parse month
@@ -592,13 +644,11 @@ with tabs[1]:
 
         # ===== 월별 집계 =====
         with st.container(border=True):
-            head_left, head_right = st.columns([3, 1], vertical_alignment="center")
-            with head_left:
-                st.markdown("**월별 집계**")
-            with head_right:
-                show_by_type = st.toggle("구분별", value=True)
+            st.markdown("**월별 집계**")
 
-            group_cols = ["월"] + (["구분"] if (show_by_type and "구분" in df.columns) else [])
+            group_cols = ["월"]
+            if "분류요약" in df.columns:
+                group_cols.append("분류요약")
             monthly_agg = {}
             if "작지번호" in df.columns:
                 monthly_agg["작지건수"] = ("작지번호", "nunique")
@@ -618,7 +668,7 @@ with tabs[1]:
                 if c in monthly.columns:
                     total_row[c] = float(monthly[c].sum()) if c != "작지건수" else int(monthly[c].sum())
             monthly2 = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
-            fmt = {c: "{:,.0f}" for c in monthly.columns if c not in group_cols}
+            fmt = {c: "{:,.0f}" for c in monthly2.columns if c not in group_cols}
             st.dataframe(
                 monthly2.style.format(fmt),
                 use_container_width=True,
@@ -635,6 +685,7 @@ with tabs[1]:
             c
             for c in [
                 "월",
+                "분류요약",
                 "구분",
                 "작지번호",
                 "고객",
