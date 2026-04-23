@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -83,7 +83,10 @@ def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", qty_col: str
 with st.sidebar:
     st.header("데이터")
     default_prod = Path("data/production_actuals_recent.csv")
-    source = st.radio("소스", ["CSV", "엑셀"], index=0, horizontal=True)
+    default_excel = Path("생산실적현황(간편)_S관.xlsx")
+    # 원천은 '생산실적현황(간편)_S관.xlsx'를 우선으로 사용(존재하면 기본값을 엑셀로).
+    default_source_idx = 1 if default_excel.exists() else 0
+    source = st.radio("소스", ["CSV", "엑셀"], index=default_source_idx, horizontal=True)
 
     if source == "CSV":
         prod_path = st.text_input(
@@ -92,7 +95,7 @@ with st.sidebar:
         )
         st.caption("CSV 인코딩은 `utf-8-sig` 권장(엑셀 호환).")
     else:
-        prod_xlsx = st.text_input("생산실적(간편)", value="생산실적현황(간편)_S관.xlsx")
+        prod_xlsx = st.text_input("생산실적(간편)", value=str(default_excel))
         st.caption("엑셀 파일이 리포지토리(같은 폴더)에 있으면 바로 동작합니다.")
 
 if source == "CSV":
@@ -122,15 +125,20 @@ with tabs[0]:
     st.subheader("S관 생산실적 현황(간편)")
     st.caption("컨셉: 전월/당월 기간조회(직접 선택) + 당월 생산실적은 끝공정(누수) 기준.")
 
-    with st.sidebar:
-        st.header("기간조회")
+    if prod_df.empty:
+        st.info("생산실적 데이터가 없습니다.")
+    else:
+        cutoff = asof - timedelta(days=1)
+        st.caption(f"기준일: {asof.isoformat()} / 집계 cutoff(당일 제외): {cutoff.isoformat()}")
+
+        # 기간조회(원하는 위치: caption과 KPI 사이)
         cols = st.columns(3)
         reset_clicked = cols[0].button("해제", use_container_width=True)
         manual_clicked = cols[1].button("직접", use_container_width=True)
         auto_clicked = cols[2].button("전월/당월", use_container_width=True)
 
         if reset_clicked:
-            st.session_state.pop("range_mode", None)
+            st.session_state["range_mode"] = "auto"
             for k in ["prev_start", "prev_end", "curr_start", "curr_end"]:
                 st.session_state.pop(k, None)
         if manual_clicked:
@@ -150,15 +158,14 @@ with tabs[0]:
                 st.session_state["curr_start"] = c0
                 st.session_state["curr_end"] = c0
 
-            st.caption("전월/당월 비교 기간을 각각 선택하세요.")
-            prev_start = st.date_input("전월 시작", key="prev_start")
-            prev_end = st.date_input("전월 종료", key="prev_end")
-            curr_start = st.date_input("당월 시작", key="curr_start")
-            curr_end = st.date_input("당월 종료", key="curr_end")
+            left, right = st.columns(2)
+            with left:
+                prev_start = st.date_input("전월 시작", key="prev_start")
+                prev_end = st.date_input("전월 종료", key="prev_end")
+            with right:
+                curr_start = st.date_input("당월 시작", key="curr_start")
+                curr_end = st.date_input("당월 종료", key="curr_end")
 
-    if prod_df.empty:
-        st.info("생산실적 데이터가 없습니다.")
-    else:
         views = build_views_with_ranges(
             prod_df,
             asof=asof,
@@ -167,7 +174,6 @@ with tabs[0]:
             curr_start=curr_start,
             curr_end=curr_end,
         )
-        st.caption(f"기준일: {views.asof.isoformat()} / 집계 cutoff(당일 제외): {views.cutoff.isoformat()}")
 
         def _sum_qty(df: pd.DataFrame) -> int:
             if df.empty:
