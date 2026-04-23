@@ -194,29 +194,35 @@ with tabs[0]:
             left_card = st.container(border=True)
 
         with right_card:
-            st.markdown("**당월**")
-            curr_filter_mode = st.radio(
-                "당월 기간",
-                options=["전체", "직접(며칠~며칠)"],
-                index=0,
-                horizontal=True,
-                label_visibility="collapsed",
-            )
-            curr_start = curr_start_default
-            curr_end = curr_end_default
-            if curr_filter_mode.startswith("직접"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    curr_start = st.date_input("당월 시작", value=curr_start_default, key="curr_start_filter")
-                with c2:
-                    curr_end = st.date_input("당월 종료", value=curr_end_default, key="curr_end_filter")
+            h1, h2, h3 = st.columns([3, 2, 1], vertical_alignment="center")
+            with h1:
+                st.markdown("**당월**")
+            with h2:
+                curr_filter_mode = st.segmented_control(
+                    "당월 기간",
+                    options=["전체", "직접(며칠~며칠)"],
+                    default=st.session_state.get("curr_filter_mode", "전체"),
+                    label_visibility="collapsed",
+                )
+                st.session_state["curr_filter_mode"] = curr_filter_mode
+            with h3:
+                with st.popover("기간"):
+                    st.caption("※ '직접' 선택 시만 적용됩니다.")
+                    st.date_input("당월 시작", value=curr_start_default, key="curr_start_filter")
+                    st.date_input("당월 종료", value=curr_end_default, key="curr_end_filter")
 
-                if curr_end > cutoff:
-                    curr_end = cutoff
-                if curr_start < curr_start_default:
-                    curr_start = curr_start_default
-                if curr_start > curr_end:
-                    st.warning("당월 기간이 올바르지 않습니다(시작일 > 종료일).")
+        curr_start = curr_start_default
+        curr_end = curr_end_default
+        if str(curr_filter_mode).startswith("직접"):
+            curr_start = st.session_state.get("curr_start_filter", curr_start_default)
+            curr_end = st.session_state.get("curr_end_filter", curr_end_default)
+
+            if curr_end > cutoff:
+                curr_end = cutoff
+            if curr_start < curr_start_default:
+                curr_start = curr_start_default
+            if curr_start > curr_end:
+                st.warning("당월 기간이 올바르지 않습니다(시작일 > 종료일).")
 
         # 전월/당월 범위 집계
         # - 전월: 월 전체
@@ -310,7 +316,13 @@ with tabs[0]:
             return total_output, comp
 
         with left_card:
-            st.markdown("**전월**")
+            h1, h2, h3 = st.columns([3, 2, 1], vertical_alignment="center")
+            with h1:
+                st.markdown("**전월**")
+            with h2:
+                st.write("")
+            with h3:
+                st.write("")
             st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
 
             st.markdown("**공정별 요약**")
