@@ -569,53 +569,161 @@ with tabs[1]:
     if orders_s.empty:
         st.info("S관 수주현황 데이터가 없습니다(매칭 결과 0행이거나 파일/컬럼을 확인하세요).")
     else:
-        # normalize/parse columns
-        month_col = "__month_date__" if "__month_date__" in orders_s.columns else "월"
-        qty_col = "오더수량" if "오더수량" in orders_s.columns else None
-        amt_col = "수주금액(원)" if "수주금액(원)" in orders_s.columns else None
-
         df = orders_s.copy()
-        if month_col == "__month_date__":
-            m = pd.to_datetime(df[month_col], errors="coerce")
-            df["_월"] = m.dt.to_period("M").dt.to_timestamp()
+
+        # Parse month
+        if "__month_date__" in df.columns:
+            m = pd.to_datetime(df["__month_date__"], errors="coerce")
+            df["월"] = m.dt.to_period("M").dt.strftime("%Y-%m")
+            if "연도" not in df.columns:
+                df["연도"] = m.dt.year
         else:
-            df["_월"] = df[month_col].astype("string")
+            df["월"] = df.get("월", pd.Series([""] * len(df))).astype("string")
 
-        if qty_col:
-            df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
-        if amt_col:
-            df[amt_col] = pd.to_numeric(df[amt_col], errors="coerce").fillna(0)
+        # Normalize numeric columns
+        for col in ["오더수량", "수주금액", "수주금액(원)", "수주금액(달러)", "포장 진도율"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        group_cols = ["_월"]
-        if "구분" in df.columns:
-            show_by_type = st.toggle("구분별로 보기", value=True)
-            if show_by_type:
-                group_cols.append("구분")
+        # Normalize date columns for view
+        for col in ["수주 전송일", "영업출고요청일", "영업협의출고일", "포장완료일"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
-        agg = {}
-        if qty_col:
-            agg[qty_col] = "sum"
-        if amt_col:
-            agg[amt_col] = "sum"
-        agg_rows = df.groupby(group_cols, dropna=False).agg(agg).reset_index()
+        # ===== 요약(연도/구분) =====
+        with st.container(border=True):
+            st.markdown("**요약**")
+            group = []
+            if "연도" in df.columns:
+                group.append("연도")
+            if "구분" in df.columns:
+                group.append("구분")
+            if not group:
+                st.info("요약에 필요한 컬럼(연도/구분)이 없습니다.")
+            else:
+                work_col = "작지번호" if "작지번호" in df.columns else None
+                agg = {}
+                if work_col:
+                    agg["작지건수"] = (work_col, "nunique")
+                if "오더수량" in df.columns:
+                    agg["오더수량 합계"] = ("오더수량", "sum")
+                if "수주금액" in df.columns:
+                    agg["수주금액 합계"] = ("수주금액", "sum")
+                if "수주금액(원)" in df.columns:
+                    agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
+                if "수주금액(달러)" in df.columns:
+                    agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
 
-        if month_col == "__month_date__":
-            agg_rows["_월"] = pd.to_datetime(agg_rows["_월"], errors="coerce").dt.strftime("%Y-%m")
-        agg_rows = agg_rows.rename(columns={"_월": "월"})
+                summary = (
+                    df.groupby(group, dropna=False)
+                    .agg(**agg)
+                    .reset_index()
+                    .sort_values(group)
+                    .reset_index(drop=True)
+                )
 
-        # display
+                # 합계 행 추가
+                total_row: dict[str, object] = {}
+                if "연도" in summary.columns:
+                    years = [y for y in summary["연도"].tolist() if pd.notna(y)]
+                    total_row["연도"] = years[0] if len(set(years)) == 1 else ""
+                if "구분" in summary.columns:
+                    total_row["구분"] = "합계"
+                for c in ["작지건수", "오더수량 합계", "수주금액 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
+                    if c in summary.columns:
+                        total_row[c] = float(summary[c].sum()) if c != "작지건수" else int(summary[c].sum())
+                summary2 = pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
+
+                fmt = {c: "{:,.0f}" for c in summary2.columns if any(k in c for k in ["건수", "합계"])}
+                st.dataframe(
+                    summary2.style.format(fmt),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ===== 월별 집계 =====
+        with st.container(border=True):
+            head_left, head_right = st.columns([3, 1], vertical_alignment="center")
+            with head_left:
+                st.markdown("**월별 집계**")
+            with head_right:
+                show_by_type = st.toggle("구분별", value=True)
+
+            group_cols = ["월"] + (["구분"] if (show_by_type and "구분" in df.columns) else [])
+            monthly_agg = {}
+            if "작지번호" in df.columns:
+                monthly_agg["작지건수"] = ("작지번호", "nunique")
+            if "오더수량" in df.columns:
+                monthly_agg["오더수량 합계"] = ("오더수량", "sum")
+            if "수주금액(원)" in df.columns:
+                monthly_agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
+            if "수주금액(달러)" in df.columns:
+                monthly_agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
+
+            monthly = df.groupby(group_cols, dropna=False).agg(**monthly_agg).reset_index()
+            monthly = monthly.sort_values(group_cols).reset_index(drop=True)
+            fmt = {c: "{:,.0f}" for c in monthly.columns if c not in group_cols}
+            st.dataframe(
+                monthly.style.format(fmt),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ===== 원천(필터) =====
+        with st.container(border=True):
+            st.markdown("**원천 데이터**")
+            c1, c2 = st.columns(2)
+            with c1:
+                months = sorted([m for m in df["월"].dropna().astype("string").unique().tolist() if str(m)])
+                sel_months = st.multiselect("월", options=months, default=months[-2:] if len(months) >= 2 else months)
+            with c2:
+                if "구분" in df.columns:
+                    types = sorted(df["구분"].dropna().astype("string").unique().tolist())
+                    sel_types = st.multiselect("구분", options=types, default=types)
+                else:
+                    sel_types = []
+
+        df_view = df.copy()
+        if sel_months:
+            df_view = df_view[df_view["월"].astype("string").isin([str(x) for x in sel_months])].copy()
+        if sel_types and "구분" in df_view.columns:
+            df_view = df_view[df_view["구분"].astype("string").isin([str(x) for x in sel_types])].copy()
+
+        show_cols = [
+            c
+            for c in [
+                "월",
+                "구분",
+                "작지번호",
+                "고객",
+                "담당자",
+                "국가",
+                "오더수량",
+                "수주금액",
+                "화폐",
+                "수주금액(원)",
+                "수주금액(달러)",
+                "수주 전송일",
+                "영업출고요청일",
+                "현재상태",
+                "포장 진도율",
+                "포장완료일",
+            ]
+            if c in df_view.columns
+        ]
+        df_view = df_view.sort_values(["월", "구분", "작지번호"], na_position="last") if all(
+            c in df_view.columns for c in ["월", "구분", "작지번호"]
+        ) else df_view
+
+        fmt = {}
+        for col in ["오더수량", "수주금액", "수주금액(원)", "수주금액(달러)"]:
+            if col in df_view.columns:
+                fmt[col] = "{:,.0f}"
+        if "포장 진도율" in df_view.columns:
+            fmt["포장 진도율"] = "{:,.1f}"
+
         st.dataframe(
-            agg_rows.style.format(
-                {
-                    (qty_col or "오더수량"): "{:,.0f}",
-                    (amt_col or "수주금액(원)"): "{:,.0f}",
-                }
-            ),
+            df_view[show_cols].style.format(fmt),
             use_container_width=True,
             hide_index=True,
         )
-
-        # charts (월 합계)
-        if "월" in agg_rows.columns and qty_col and len(group_cols) == 1:
-            chart_df = agg_rows.set_index("월")[[qty_col]].copy()
-            st.line_chart(chart_df)
