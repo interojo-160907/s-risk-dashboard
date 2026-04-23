@@ -28,6 +28,7 @@ class ProductionActualCols:
     품목코드: str = "품목코드"
     생산수량: str = "생산수량"  # Gross
     양품수량: str = "양품수량"  # Good (optional)
+    신규분류요약: str = "신규분류요약"  # optional (grouping)
 
 
 APS_COLS = APSSnapshotCols()

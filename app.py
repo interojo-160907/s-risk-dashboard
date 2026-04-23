@@ -26,7 +26,7 @@ st.markdown(
   .stApp { background: #f7f2ea; }
   /* 상단 헤더 색상(다른 대시보드처럼) */
   header[data-testid="stHeader"] {
-    background: linear-gradient(90deg, rgba(27,94,32,0.18) 0%, rgba(247,242,234,0.0) 55%);
+    background: #f7f2ea;
     border-bottom: 1px solid rgba(0,0,0,0.06);
   }
   /* 상단 우측 툴바/메뉴 배경도 투명 처리 */
@@ -105,6 +105,7 @@ def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: 
             PROD_COLS.품목코드: raw["품목코드"].map(_norm_text),
             PROD_COLS.생산수량: pd.to_numeric(raw["생산수량"], errors="coerce"),
             PROD_COLS.양품수량: pd.to_numeric(raw[good_col], errors="coerce"),
+            PROD_COLS.신규분류요약: raw.get("신규분류요약", pd.Series([None] * len(raw))).map(_norm_text),
         }
     )
     out = out.dropna(subset=[PROD_COLS.생산일자, PROD_COLS.생산수량]).copy()
@@ -112,6 +113,8 @@ def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: 
     out[PROD_COLS.생산수량] = out[PROD_COLS.생산수량].astype(int)
     out[PROD_COLS.양품수량] = pd.to_numeric(out[PROD_COLS.양품수량], errors="coerce").fillna(0).astype(int)
     cols = PROD_REQUIRED_COLS + [PROD_COLS.양품수량]
+    if PROD_COLS.신규분류요약 in out.columns:
+        cols.append(PROD_COLS.신규분류요약)
     return out[cols].copy()
 
 
@@ -296,6 +299,72 @@ with tabs[0]:
 
             return total_output, comp
 
+        def _category_final_and_comp_yield(df: pd.DataFrame, *, asof: date) -> pd.DataFrame:
+            if df.empty or PROD_COLS.신규분류요약 not in df.columns:
+                return pd.DataFrame(columns=[PROD_COLS.신규분류요약, "생산수량", "양품수량", "수율"])
+
+            gross_col = PROD_COLS.생산수량
+            good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
+            final_proc = "누수/규격검사"
+
+            base = df.copy()
+            base[PROD_COLS.신규분류요약] = base[PROD_COLS.신규분류요약].map(_norm_text)
+            base = base[base[PROD_COLS.신규분류요약].astype(str).str.len() > 0].copy()
+            if base.empty:
+                return pd.DataFrame(columns=[PROD_COLS.신규분류요약, "생산수량", "양품수량", "수율"])
+
+            # final quantities (누수/규격검사 기준)
+            final_df = base[base[PROD_COLS.공정].astype(str) == final_proc].copy()
+            final_sum = (
+                final_df.groupby(PROD_COLS.신규분류요약, dropna=False)[[gross_col, good_col]]
+                .sum()
+                .rename(columns={gross_col: "생산수량", good_col: "양품수량"})
+            )
+
+            # composite yield per category = product of per-process yields
+            proc_sum = (
+                base.groupby([PROD_COLS.신규분류요약, PROD_COLS.공정], dropna=False)[[gross_col, good_col]]
+                .sum()
+                .reset_index()
+            )
+            proc_sum["수율"] = proc_sum.apply(
+                lambda r: (r[good_col] / r[gross_col]) if float(r[gross_col]) > 0 else None,
+                axis=1,
+            )
+
+            # pivot to ensure all processes exist
+            yield_map = proc_sum.pivot_table(
+                index=PROD_COLS.신규분류요약,
+                columns=PROD_COLS.공정,
+                values="수율",
+                aggfunc="first",
+            )
+
+            comp_vals: dict[str, float] = {}
+            for cat, row in yield_map.iterrows():
+                ys = []
+                ok = True
+                for proc in process_order:
+                    y = row.get(proc)
+                    if y is None or pd.isna(y):
+                        ok = False
+                        break
+                    ys.append(float(y))
+                if not ok:
+                    continue
+                prod_val = 1.0
+                for y in ys:
+                    prod_val *= y
+                comp_vals[str(cat)] = float(prod_val)
+
+            comp_series = pd.Series(comp_vals, name="수율")
+
+            out = final_sum.join(comp_series, how="left").reset_index()
+            out["생산수량"] = pd.to_numeric(out["생산수량"], errors="coerce").fillna(0).astype(int)
+            out["양품수량"] = pd.to_numeric(out["양품수량"], errors="coerce").fillna(0).astype(int)
+            out = out.sort_values("양품수량", ascending=False).reset_index(drop=True)
+            return out[[PROD_COLS.신규분류요약, "생산수량", "양품수량", "수율"]].copy()
+
         def _forecast_eom_output_mtd(df: pd.DataFrame, *, asof: date) -> int | None:
             # Forecast end-of-month output using final-process good qty MTD.
             # - MTD uses cutoff (asof-1) already in views.curr_month.df
@@ -342,15 +411,25 @@ with tabs[0]:
             st.markdown("**공정별 요약**")
             prev_proc = _process_summary(views.prev_month.df)
             prev_total, prev_comp = _total_output_and_yield(views.prev_month.df)
-            k1, k2, k3 = st.columns(3)
+            k1, k2 = st.columns(2)
             k1.metric("총 생산실적(누수/규격검사 양품)", f"{prev_total:,}")
             k2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
-            k3.metric("월말 예상(누수/규격검사 양품)", f"{prev_total:,}")
             st.dataframe(
                 prev_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                 use_container_width=True,
                 hide_index=True,
             )
+
+            st.markdown("**신규분류요약별(누수/규격검사 기준)**")
+            prev_cat = _category_final_and_comp_yield(views.prev_month.df, asof=asof)
+            if prev_cat.empty:
+                st.info("신규분류요약 데이터가 없어 그룹 요약을 표시할 수 없습니다.")
+            else:
+                st.dataframe(
+                    prev_cat.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
             st.markdown("**일자별 집계**")
             prev_daily = _daily_process_summary(views.prev_month.df)
@@ -376,6 +455,17 @@ with tabs[0]:
                 use_container_width=True,
                 hide_index=True,
             )
+
+            st.markdown("**신규분류요약별(누수/규격검사 기준)**")
+            curr_cat = _category_final_and_comp_yield(views.curr_month.df, asof=asof)
+            if curr_cat.empty:
+                st.info("신규분류요약 데이터가 없어 그룹 요약을 표시할 수 없습니다.")
+            else:
+                st.dataframe(
+                    curr_cat.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
             st.markdown("**일자별 집계**")
             curr_daily = _daily_process_summary(views.curr_month.df)

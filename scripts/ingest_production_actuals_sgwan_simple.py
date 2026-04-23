@@ -102,6 +102,7 @@ def main() -> int:
             PROD_COLS.품목코드: raw["품목코드"].map(_norm_text),
             PROD_COLS.생산수량: pd.to_numeric(raw[prod_col], errors="coerce"),
             PROD_COLS.양품수량: pd.to_numeric(raw[good_col], errors="coerce"),
+            PROD_COLS.신규분류요약: raw.get("신규분류요약", pd.Series([None] * len(raw))).map(_norm_text),
         }
     )
 
@@ -114,7 +115,11 @@ def main() -> int:
     # 결과 저장(rolling 2개월 파일이므로 overwrite)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cols = PROD_REQUIRED_COLS + ([PROD_COLS.양품수량] if PROD_COLS.양품수량 in out.columns else [])
+    cols = PROD_REQUIRED_COLS.copy()
+    if PROD_COLS.양품수량 in out.columns:
+        cols.append(PROD_COLS.양품수량)
+    if PROD_COLS.신규분류요약 in out.columns:
+        cols.append(PROD_COLS.신규분류요약)
     out[cols].to_csv(out_path, index=False, encoding="utf-8-sig")
 
     logger.info(
