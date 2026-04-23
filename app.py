@@ -225,7 +225,7 @@ with tabs[0]:
 
         def _daily_process_summary(df: pd.DataFrame) -> pd.DataFrame:
             if df.empty:
-                return pd.DataFrame(columns=[PROD_COLS.생산일자, PROD_COLS.공정, "생산수량", "양품수량"])
+                return pd.DataFrame(columns=[PROD_COLS.생산일자, PROD_COLS.공정, "생산수량", "양품수량", "수율"])
 
             gross_col = PROD_COLS.생산수량
             good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
@@ -240,7 +240,33 @@ with tabs[0]:
             out = out.sort_values([PROD_COLS.생산일자, PROD_COLS.공정]).copy()
             out["생산수량"] = pd.to_numeric(out["생산수량"], errors="coerce").fillna(0).astype(int)
             out["양품수량"] = pd.to_numeric(out["양품수량"], errors="coerce").fillna(0).astype(int)
+            out["수율"] = out.apply(lambda r: (r["양품수량"] / r["생산수량"]) if r["생산수량"] > 0 else None, axis=1)
             return out.reset_index(drop=True)
+
+        def _total_output_and_yield(df: pd.DataFrame) -> tuple[int, float | None]:
+            if df.empty:
+                return 0, None
+
+            gross_col = PROD_COLS.생산수량
+            good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
+            final_proc = "누수/규격검사"
+
+            final_df = df[df[PROD_COLS.공정].astype(str) == final_proc].copy()
+            total_output = int(pd.to_numeric(final_df[good_col], errors="coerce").fillna(0).sum()) if not final_df.empty else 0
+
+            comp = None
+            comp_val = 1.0
+            for proc in process_order:
+                sub = df[df[PROD_COLS.공정].astype(str) == proc].copy()
+                gross = int(pd.to_numeric(sub[gross_col], errors="coerce").fillna(0).sum()) if not sub.empty else 0
+                good = int(pd.to_numeric(sub[good_col], errors="coerce").fillna(0).sum()) if not sub.empty else 0
+                if gross <= 0:
+                    comp = None
+                    break
+                comp_val *= (good / gross)
+                comp = float(comp_val)
+
+            return total_output, comp
 
         left, right = st.columns(2)
         with left:
@@ -250,11 +276,33 @@ with tabs[0]:
 
                 st.markdown("**공정별 요약**")
                 prev_proc = _process_summary(views.prev_month.df)
-                st.dataframe(prev_proc, use_container_width=True, hide_index=True)
+                prev_total, prev_comp = _total_output_and_yield(views.prev_month.df)
+                k1, k2 = st.columns(2)
+                k1.metric("총 생산실적(누수/규격검사 양품)", f"{prev_total:,}")
+                k2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
+                st.dataframe(
+                    prev_proc,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "생산수량": st.column_config.NumberColumn(format=",d"),
+                        "양품수량": st.column_config.NumberColumn(format=",d"),
+                        "수율": st.column_config.NumberColumn(format=".1%"),
+                    },
+                )
 
                 st.markdown("**일자별 집계**")
                 prev_daily = _daily_process_summary(views.prev_month.df)
-                st.dataframe(prev_daily, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    prev_daily,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "생산수량": st.column_config.NumberColumn(format=",d"),
+                        "양품수량": st.column_config.NumberColumn(format=",d"),
+                        "수율": st.column_config.NumberColumn(format=".1%"),
+                    },
+                )
 
         with right:
             with st.container(border=True):
@@ -263,11 +311,33 @@ with tabs[0]:
 
                 st.markdown("**공정별 요약**")
                 curr_proc = _process_summary(views.curr_month.df)
-                st.dataframe(curr_proc, use_container_width=True, hide_index=True)
+                curr_total, curr_comp = _total_output_and_yield(views.curr_month.df)
+                k1, k2 = st.columns(2)
+                k1.metric("총 생산실적(누수/규격검사 양품)", f"{curr_total:,}")
+                k2.metric("종합 수율", f"{curr_comp*100:.1f}%" if curr_comp is not None else "-")
+                st.dataframe(
+                    curr_proc,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "생산수량": st.column_config.NumberColumn(format=",d"),
+                        "양품수량": st.column_config.NumberColumn(format=",d"),
+                        "수율": st.column_config.NumberColumn(format=".1%"),
+                    },
+                )
 
                 st.markdown("**일자별 집계**")
                 curr_daily = _daily_process_summary(views.curr_month.df)
-                st.dataframe(curr_daily, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    curr_daily,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "생산수량": st.column_config.NumberColumn(format=",d"),
+                        "양품수량": st.column_config.NumberColumn(format=",d"),
+                        "수율": st.column_config.NumberColumn(format=".1%"),
+                    },
+                )
 
         with st.expander("원천 데이터 보기(전월+당월, cutoff 반영)"):
             st.dataframe(
