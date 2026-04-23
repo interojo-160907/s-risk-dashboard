@@ -172,28 +172,57 @@ with tabs[0]:
         st.info("생산실적 데이터가 없습니다.")
     else:
         cutoff = asof - timedelta(days=1)
-        st.caption(f"기준일: {asof.isoformat()} / 집계 cutoff(당일 제외): {cutoff.isoformat()}")
-        try:
-            if not prod_df.empty and PROD_COLS.생산일자 in prod_df.columns:
-                max_d = pd.to_datetime(prod_df[PROD_COLS.생산일자], errors="coerce").dt.date.max()
-                if pd.notna(max_d):
-                    st.caption(f"데이터 최대 생산일자: {max_d.isoformat()} (소스: {source})")
-        except Exception:
-            pass
 
         # 업로드(원천 엑셀 파일 수정시간 기준) 표시
         try:
             excel_path = Path(prod_xlsx)
             if excel_path.exists():
                 dt = datetime.fromtimestamp(excel_path.stat().st_mtime, tz=ZoneInfo("Asia/Seoul"))
-                st.caption(f"업로드 시간(원천 엑셀 수정시간): {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                st.caption(f"생산실적 업로드 시간 : {dt.strftime('%Y-%m-%d %H:%M:%S')} (한국시간)")
         except Exception:
             pass
 
-        # 전월/당월 기간은 자동(월 단위)로만 집계.
+        # 전월은 월 단위 고정, 당월만 기간 필터(전체 / 직접 선택)
         prev_start, prev_end = prev_month_range(asof)
-        curr_start = month_start(asof)
-        curr_end = cutoff
+        curr_start_default = month_start(asof)
+        curr_end_default = cutoff
+
+        left_col, right_col = st.columns(2)
+        with right_col:
+            right_card = st.container(border=True)
+        with left_col:
+            left_card = st.container(border=True)
+
+        with right_card:
+            st.markdown("**당월**")
+            curr_filter_mode = st.radio(
+                "당월 기간",
+                options=["전체", "직접(며칠~며칠)"],
+                index=0,
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+            curr_start = curr_start_default
+            curr_end = curr_end_default
+            if curr_filter_mode.startswith("직접"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    curr_start = st.date_input("당월 시작", value=curr_start_default, key="curr_start_filter")
+                with c2:
+                    curr_end = st.date_input("당월 종료", value=curr_end_default, key="curr_end_filter")
+
+                if curr_end > cutoff:
+                    curr_end = cutoff
+                if curr_start < curr_start_default:
+                    curr_start = curr_start_default
+                if curr_start > curr_end:
+                    st.warning("당월 기간이 올바르지 않습니다(시작일 > 종료일).")
+
+        # 전월/당월 범위 집계
+        # - 전월: 월 전체
+        # - 당월: 선택된 범위(기본=전체 MTD, cutoff까지)
+        curr_start = curr_start if curr_start <= curr_end else curr_start_default
+        curr_end = curr_end if curr_start <= curr_end else curr_end_default
 
         views = build_views_with_ranges(
             prod_df,
@@ -280,55 +309,51 @@ with tabs[0]:
 
             return total_output, comp
 
-        left, right = st.columns(2)
-        with left:
-            with st.container(border=True):
-                st.markdown("**전월**")
-                st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
+        with left_card:
+            st.markdown("**전월**")
+            st.caption(f"생산일수: {_n_days(views.prev_month.df):,} / 품목수: {_n_items(views.prev_month.df):,}")
 
-                st.markdown("**공정별 요약**")
-                prev_proc = _process_summary(views.prev_month.df)
-                prev_total, prev_comp = _total_output_and_yield(views.prev_month.df)
-                k1, k2 = st.columns(2)
-                k1.metric("총 생산실적(누수/규격검사 양품)", f"{prev_total:,}")
-                k2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
-                st.dataframe(
-                    prev_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            st.markdown("**공정별 요약**")
+            prev_proc = _process_summary(views.prev_month.df)
+            prev_total, prev_comp = _total_output_and_yield(views.prev_month.df)
+            k1, k2 = st.columns(2)
+            k1.metric("총 생산실적(누수/규격검사 양품)", f"{prev_total:,}")
+            k2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
+            st.dataframe(
+                prev_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-                st.markdown("**일자별 집계**")
-                prev_daily = _daily_process_summary(views.prev_month.df)
-                st.dataframe(
-                    prev_daily.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            st.markdown("**일자별 집계**")
+            prev_daily = _daily_process_summary(views.prev_month.df)
+            st.dataframe(
+                prev_daily.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        with right:
-            with st.container(border=True):
-                st.markdown("**당월**")
-                st.caption(f"생산일수: {_n_days(views.curr_month.df):,} / 품목수: {_n_items(views.curr_month.df):,}")
+        with right_card:
+            st.caption(f"생산일수: {_n_days(views.curr_month.df):,} / 품목수: {_n_items(views.curr_month.df):,}")
 
-                st.markdown("**공정별 요약**")
-                curr_proc = _process_summary(views.curr_month.df)
-                curr_total, curr_comp = _total_output_and_yield(views.curr_month.df)
-                k1, k2 = st.columns(2)
-                k1.metric("총 생산실적(누수/규격검사 양품)", f"{curr_total:,}")
-                k2.metric("종합 수율", f"{curr_comp*100:.1f}%" if curr_comp is not None else "-")
-                st.dataframe(
-                    curr_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            st.markdown("**공정별 요약**")
+            curr_proc = _process_summary(views.curr_month.df)
+            curr_total, curr_comp = _total_output_and_yield(views.curr_month.df)
+            k1, k2 = st.columns(2)
+            k1.metric("총 생산실적(누수/규격검사 양품)", f"{curr_total:,}")
+            k2.metric("종합 수율", f"{curr_comp*100:.1f}%" if curr_comp is not None else "-")
+            st.dataframe(
+                curr_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-                st.markdown("**일자별 집계**")
-                curr_daily = _daily_process_summary(views.curr_month.df)
-                st.dataframe(
-                    curr_daily.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            st.markdown("**일자별 집계**")
+            curr_daily = _daily_process_summary(views.curr_month.df)
+            st.dataframe(
+                curr_daily.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         # 원천 데이터 보기 제거(요청사항)
