@@ -590,57 +590,6 @@ with tabs[1]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
-        # ===== 요약(연도/구분) =====
-        with st.container(border=True):
-            st.markdown("**요약**")
-            group = []
-            if "연도" in df.columns:
-                group.append("연도")
-            if "구분" in df.columns:
-                group.append("구분")
-            if not group:
-                st.info("요약에 필요한 컬럼(연도/구분)이 없습니다.")
-            else:
-                work_col = "작지번호" if "작지번호" in df.columns else None
-                agg = {}
-                if work_col:
-                    agg["작지건수"] = (work_col, "nunique")
-                if "오더수량" in df.columns:
-                    agg["오더수량 합계"] = ("오더수량", "sum")
-                if "수주금액" in df.columns:
-                    agg["수주금액 합계"] = ("수주금액", "sum")
-                if "수주금액(원)" in df.columns:
-                    agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
-                if "수주금액(달러)" in df.columns:
-                    agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
-
-                summary = (
-                    df.groupby(group, dropna=False)
-                    .agg(**agg)
-                    .reset_index()
-                    .sort_values(group)
-                    .reset_index(drop=True)
-                )
-
-                # 합계 행 추가
-                total_row: dict[str, object] = {}
-                if "연도" in summary.columns:
-                    years = [y for y in summary["연도"].tolist() if pd.notna(y)]
-                    total_row["연도"] = years[0] if len(set(years)) == 1 else ""
-                if "구분" in summary.columns:
-                    total_row["구분"] = "합계"
-                for c in ["작지건수", "오더수량 합계", "수주금액 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
-                    if c in summary.columns:
-                        total_row[c] = float(summary[c].sum()) if c != "작지건수" else int(summary[c].sum())
-                summary2 = pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
-
-                fmt = {c: "{:,.0f}" for c in summary2.columns if any(k in c for k in ["건수", "합계"])}
-                st.dataframe(
-                    summary2.style.format(fmt),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
         # ===== 월별 집계 =====
         with st.container(border=True):
             head_left, head_right = st.columns([3, 1], vertical_alignment="center")
@@ -662,32 +611,25 @@ with tabs[1]:
 
             monthly = df.groupby(group_cols, dropna=False).agg(**monthly_agg).reset_index()
             monthly = monthly.sort_values(group_cols).reset_index(drop=True)
+            # 합계 행 추가(월별 집계용)
+            total_row: dict[str, object] = {c: "" for c in group_cols}
+            total_row["월"] = "합계"
+            for c in ["작지건수", "오더수량 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
+                if c in monthly.columns:
+                    total_row[c] = float(monthly[c].sum()) if c != "작지건수" else int(monthly[c].sum())
+            monthly2 = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
             fmt = {c: "{:,.0f}" for c in monthly.columns if c not in group_cols}
             st.dataframe(
-                monthly.style.format(fmt),
+                monthly2.style.format(fmt),
                 use_container_width=True,
                 hide_index=True,
             )
 
         # ===== 원천(필터) =====
         with st.container(border=True):
-            st.markdown("**원천 데이터**")
-            c1, c2 = st.columns(2)
-            with c1:
-                months = sorted([m for m in df["월"].dropna().astype("string").unique().tolist() if str(m)])
-                sel_months = st.multiselect("월", options=months, default=months[-2:] if len(months) >= 2 else months)
-            with c2:
-                if "구분" in df.columns:
-                    types = sorted(df["구분"].dropna().astype("string").unique().tolist())
-                    sel_types = st.multiselect("구분", options=types, default=types)
-                else:
-                    sel_types = []
+            st.markdown("**상세 수주 내역**")
 
         df_view = df.copy()
-        if sel_months:
-            df_view = df_view[df_view["월"].astype("string").isin([str(x) for x in sel_months])].copy()
-        if sel_types and "구분" in df_view.columns:
-            df_view = df_view[df_view["구분"].astype("string").isin([str(x) for x in sel_types])].copy()
 
         show_cols = [
             c
