@@ -64,7 +64,9 @@ def _map_process(code: object) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인") -> pd.DataFrame:
+def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: float | None = None) -> pd.DataFrame:
+    # cache_bust: 파일 수정시간 등을 넘겨 캐시가 파일 변경을 감지하도록 함.
+    _ = cache_bust
     p = Path(prod_xlsx)
     if not p.exists():
         raise FileNotFoundError(str(p))
@@ -135,7 +137,8 @@ else:
     logger.info("source=EXCEL | prod=%s", prod_xlsx)
     with st.spinner("엑셀에서 생산실적 생성 중..."):
         try:
-            prod_df = load_prod_from_excel(prod_xlsx, status="확인")
+            excel_mtime = Path(prod_xlsx).stat().st_mtime if Path(prod_xlsx).exists() else None
+            prod_df = load_prod_from_excel(prod_xlsx, status="확인", cache_bust=excel_mtime)
         except Exception as e:
             logger.exception("excel->production failed")
             st.error(f"엑셀 → 생산실적 변환 실패: {e}")
