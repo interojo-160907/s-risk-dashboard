@@ -170,6 +170,13 @@ with tabs[0]:
     else:
         cutoff = asof - timedelta(days=1)
         st.caption(f"기준일: {asof.isoformat()} / 집계 cutoff(당일 제외): {cutoff.isoformat()}")
+        try:
+            if not prod_df.empty and PROD_COLS.생산일자 in prod_df.columns:
+                max_d = pd.to_datetime(prod_df[PROD_COLS.생산일자], errors="coerce").dt.date.max()
+                if pd.notna(max_d):
+                    st.caption(f"데이터 최대 생산일자: {max_d.isoformat()} (소스: {source})")
+        except Exception:
+            pass
 
         # 업로드(원천 엑셀 파일 수정시간 기준) 표시
         try:
