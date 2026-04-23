@@ -26,7 +26,8 @@ class ProductionActualCols:
     생산일자: str = "생산일자"
     공정: str = "공정"
     품목코드: str = "품목코드"
-    생산수량: str = "생산수량"
+    생산수량: str = "생산수량"  # Gross
+    양품수량: str = "양품수량"  # Good (optional)
 
 
 APS_COLS = APSSnapshotCols()

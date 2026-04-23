@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +20,23 @@ st.title("S관 생산실적 대시보드")
 paths = default_data_paths("data")
 logger = get_logger("streamlit.app", log_file="logs/streamlit_app.log")
 
+st.markdown(
+    """
+<style>
+  .stApp { background: #f7f2ea; }
+  /* pills/segment buttons 느낌 */
+  .stButton > button { border-radius: 999px; padding: 0.28rem 0.9rem; border: 1px solid rgba(0,0,0,0.18); background: #fff; }
+  .stButton > button:hover { border-color: rgba(0,0,0,0.35); }
+  div[data-testid="stVerticalBlockBorderWrapper"] { background: rgba(255,255,255,0.55); border-radius: 14px; border: 1px solid rgba(0,0,0,0.06); }
+  div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: 0.6rem 0.9rem; }
+  /* pills 선택 강조(버전별 DOM 차이가 있어 범용 selector로 커버) */
+  div[data-testid="stPills"] [aria-selected="true"] { background: rgba(46,125,50,0.16) !important; border-color: rgba(46,125,50,0.55) !important; color: #1b5e20 !important; }
+  div[data-testid="stPills"] [aria-selected="false"] { background: #fff !important; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 
 def _norm_text(x: object) -> str:
     if pd.isna(x):
@@ -29,22 +47,22 @@ def _norm_text(x: object) -> str:
 def _map_process(code: object) -> str:
     s = _norm_text(code)
     if s.startswith("[10]"):
-        return "사출"
+        return "사출조립"
     if s.startswith("[20]"):
         return "분리"
     if s.startswith("[45]"):
-        return "하이드"
+        return "하이드레이션/전면검"
     if s.startswith("[55]"):
-        return "접착"
+        return "접착/멸균"
     if s.startswith("[80]"):
-        return "누수"
+        return "누수/규격검사"
     if s.startswith("[85]"):
         return "포장"
     return s
 
 
 @st.cache_data(show_spinner=False)
-def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", qty_col: str = "양품수량") -> pd.DataFrame:
+def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인") -> pd.DataFrame:
     p = Path(prod_xlsx)
     if not p.exists():
         raise FileNotFoundError(str(p))
@@ -57,7 +75,9 @@ def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", qty_col: str
         return pd.DataFrame(columns=PROD_REQUIRED_COLS)
 
     raw = pd.concat(frames, ignore_index=True)
-    required = ["생산일자", "공정코드", "품목코드", qty_col, "상태"]
+    # prefer 샘플 제외 양품수량(있으면) else 양품수량
+    good_col = "샘플제외 양품수량" if "샘플제외 양품수량" in raw.columns else "양품수량"
+    required = ["생산일자", "공정코드", "품목코드", "생산수량", good_col, "상태"]
     missing = [c for c in required if c not in raw.columns]
     if missing:
         raise ValueError(f"필수 컬럼 누락: {missing}")
@@ -71,13 +91,16 @@ def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", qty_col: str
             PROD_COLS.생산일자: pd.to_datetime(raw["생산일자"], errors="coerce").dt.date,
             PROD_COLS.공정: raw["공정코드"].map(_map_process),
             PROD_COLS.품목코드: raw["품목코드"].map(_norm_text),
-            PROD_COLS.생산수량: pd.to_numeric(raw[qty_col], errors="coerce"),
+            PROD_COLS.생산수량: pd.to_numeric(raw["생산수량"], errors="coerce"),
+            PROD_COLS.양품수량: pd.to_numeric(raw[good_col], errors="coerce"),
         }
     )
     out = out.dropna(subset=[PROD_COLS.생산일자, PROD_COLS.생산수량]).copy()
     out = out[out[PROD_COLS.품목코드].astype(str).str.len() > 0].copy()
     out[PROD_COLS.생산수량] = out[PROD_COLS.생산수량].astype(int)
-    return out[PROD_REQUIRED_COLS].copy()
+    out[PROD_COLS.양품수량] = pd.to_numeric(out[PROD_COLS.양품수량], errors="coerce").fillna(0).astype(int)
+    cols = PROD_REQUIRED_COLS + [PROD_COLS.양품수량]
+    return out[cols].copy()
 
 
 with st.sidebar:
@@ -110,7 +133,7 @@ else:
     logger.info("source=EXCEL | prod=%s", prod_xlsx)
     with st.spinner("엑셀에서 생산실적 생성 중..."):
         try:
-            prod_df = load_prod_from_excel(prod_xlsx, status="확인", qty_col="양품수량")
+            prod_df = load_prod_from_excel(prod_xlsx, status="확인")
         except Exception as e:
             logger.exception("excel->production failed")
             st.error(f"엑셀 → 생산실적 변환 실패: {e}")
@@ -131,40 +154,80 @@ with tabs[0]:
         cutoff = asof - timedelta(days=1)
         st.caption(f"기준일: {asof.isoformat()} / 집계 cutoff(당일 제외): {cutoff.isoformat()}")
 
-        # 기간조회(원하는 위치: caption과 KPI 사이)
-        cols = st.columns(3)
-        reset_clicked = cols[0].button("해제", use_container_width=True)
-        manual_clicked = cols[1].button("직접", use_container_width=True)
-        auto_clicked = cols[2].button("전월/당월", use_container_width=True)
+        # 업데이트 시간(파일 수정시간 기준)
+        try:
+            src_path = Path(prod_xlsx) if source == "엑셀" else Path(prod_path)
+            if src_path.exists():
+                dt = datetime.fromtimestamp(src_path.stat().st_mtime, tz=ZoneInfo("Asia/Seoul"))
+                st.caption(f"업데이트(파일 수정시간): {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        except Exception:
+            pass
 
-        if reset_clicked:
-            st.session_state["range_mode"] = "auto"
-            for k in ["prev_start", "prev_end", "curr_start", "curr_end"]:
-                st.session_state.pop(k, None)
-        if manual_clicked:
-            st.session_state["range_mode"] = "manual"
-        if auto_clicked:
-            st.session_state["range_mode"] = "auto"
+        with st.container(border=True):
+            # 공정 선택(일자별 차트/표에 적용) - KPI는 누수 기준 고정
+            view_proc = st.pills(
+                "공정",
+                options=["사출조립", "분리", "하이드레이션/전면검", "접착/멸균", "누수/규격검사"],
+                default="누수/규격검사",
+                selection_mode="single",
+                label_visibility="collapsed",
+            )
 
-        range_mode = st.session_state.get("range_mode", "auto")
-        prev_start = prev_end = curr_start = curr_end = None
-        if range_mode == "manual":
-            if "prev_start" not in st.session_state:
-                p0, p1 = prev_month_range(asof)
-                st.session_state["prev_start"] = p0
-                st.session_state["prev_end"] = p1
-            if "curr_start" not in st.session_state:
-                c0 = month_start(asof)
-                st.session_state["curr_start"] = c0
-                st.session_state["curr_end"] = c0
+            # 기간조회(해제/직접/당월/+7일/+14일)
+            preset = st.pills(
+                "기간조회",
+                options=["해제", "직접", "당월", "+7일", "+14일"],
+                default=st.session_state.get("range_preset", "당월"),
+                selection_mode="single",
+                label_visibility="collapsed",
+            )
 
-            left, right = st.columns(2)
-            with left:
-                prev_start = st.date_input("전월 시작", key="prev_start")
-                prev_end = st.date_input("전월 종료", key="prev_end")
-            with right:
-                curr_start = st.date_input("당월 시작", key="curr_start")
-                curr_end = st.date_input("당월 종료", key="curr_end")
+            if preset == "해제":
+                st.session_state["range_preset"] = "당월"
+                for k in ["prev_start", "prev_end", "curr_start", "curr_end"]:
+                    st.session_state.pop(k, None)
+                preset = "당월"
+            else:
+                st.session_state["range_preset"] = preset
+
+            prev_start = prev_end = curr_start = curr_end = None
+            if preset == "직접":
+                if "prev_start" not in st.session_state:
+                    p0, p1 = prev_month_range(asof)
+                    st.session_state["prev_start"] = p0
+                    st.session_state["prev_end"] = p1
+                if "curr_start" not in st.session_state:
+                    c0 = month_start(asof)
+                    st.session_state["curr_start"] = c0
+                    st.session_state["curr_end"] = cutoff if cutoff >= c0 else c0
+
+                left, right = st.columns(2)
+                with left:
+                    prev_start = st.date_input("전월 시작", key="prev_start")
+                    prev_end = st.date_input("전월 종료", key="prev_end")
+                with right:
+                    curr_start = st.date_input("당월 시작", key="curr_start")
+                    curr_end = st.date_input("당월 종료", key="curr_end")
+            elif preset == "당월":
+                prev_start, prev_end = prev_month_range(asof)
+                curr_start = month_start(asof)
+                curr_end = cutoff
+            elif preset == "+7일":
+                curr_end = cutoff
+                curr_start = cutoff - timedelta(days=6)
+                prev_end = curr_start - timedelta(days=1)
+                prev_start = prev_end - timedelta(days=6)
+            elif preset == "+14일":
+                curr_end = cutoff
+                curr_start = cutoff - timedelta(days=13)
+                prev_end = curr_start - timedelta(days=1)
+                prev_start = prev_end - timedelta(days=13)
+
+            # end가 cutoff를 넘으면 클리핑
+            if prev_start and prev_end and prev_end > cutoff:
+                prev_end = cutoff
+            if curr_start and curr_end and curr_end > cutoff:
+                curr_end = cutoff
 
         views = build_views_with_ranges(
             prod_df,
@@ -175,16 +238,50 @@ with tabs[0]:
             curr_end=curr_end,
         )
 
-        def _sum_qty(df: pd.DataFrame) -> int:
+        def _sum_qty(df: pd.DataFrame, col: str) -> int:
             if df.empty:
                 return 0
-            return int(pd.to_numeric(df[PROD_COLS.생산수량], errors="coerce").fillna(0).sum())
+            if col not in df.columns:
+                return 0
+            return int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
 
-        def _sum_final(df: pd.DataFrame, *, final_proc: str) -> int:
+        def _yield_table(df: pd.DataFrame, *, process_order: list[str]) -> tuple[pd.DataFrame, float | None]:
             if df.empty:
-                return 0
-            mask = df[PROD_COLS.공정].astype(str).str.contains(final_proc, na=False)
-            return _sum_qty(df[mask].copy())
+                empty = pd.DataFrame(columns=["공정", "생산수량", "양품수량", "수율"])
+                return empty, None
+
+            gross_col = PROD_COLS.생산수량
+            good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
+
+            rows: list[dict[str, object]] = []
+            yields_order: list[float | None] = []
+            for proc in process_order:
+                sub = df[df[PROD_COLS.공정].astype(str) == proc].copy()
+                gross = _sum_qty(sub, gross_col)
+                good = _sum_qty(sub, good_col)
+                y = (good / gross) if gross > 0 else None
+                yields_order.append(float(y) if y is not None else None)
+                rows.append(
+                    {
+                        "공정": proc,
+                        "생산수량": f"{gross:,}",
+                        "양품수량": f"{good:,}",
+                        "수율": (f"{y*100:.1f}%" if y is not None else ""),
+                    }
+                )
+
+            total_gross = _sum_qty(df, gross_col)
+            total_good = _sum_qty(df, good_col)
+            rows.append({"공정": "TOTAL", "생산수량": f"{total_gross:,}", "양품수량": f"{total_good:,}", "수율": ""})
+
+            comp = None
+            if yields_order and all(y is not None for y in yields_order):
+                comp_val = 1.0
+                for y in yields_order:
+                    comp_val *= float(y)
+                comp = float(comp_val)
+
+            return pd.DataFrame(rows), comp
 
         def _n_days(df: pd.DataFrame) -> int:
             if df.empty:
@@ -196,71 +293,45 @@ with tabs[0]:
                 return 0
             return int(df[PROD_COLS.품목코드].nunique())
 
-        final_proc = "누수"
-        prev_total = _sum_final(views.prev_month.df, final_proc=final_proc)
-        curr_total = _sum_final(views.curr_month.df, final_proc=final_proc)
-        prev_all = _sum_qty(views.prev_month.df)
-        curr_all = _sum_qty(views.curr_month.df)
+        process_order = ["사출조립", "분리", "하이드레이션/전면검", "접착/멸균", "누수/규격검사"]
+        final_proc = "누수/규격검사"
+        gross_col = PROD_COLS.생산수량
+        good_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in views.curr_month.df.columns else gross_col
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("전월 생산수량(누수)", f"{prev_total:,}")
-        m2.metric("당월 생산수량(누수/MTD)", f"{curr_total:,}")
-        m3.metric("당월 생산일수", f"{_n_days(views.curr_month.df):,}")
-        m4.metric("당월 품목수", f"{_n_items(views.curr_month.df):,}")
-        st.caption(f"참고(전체 공정 합계) 전월: {prev_all:,} / 당월: {curr_all:,}")
+        def _final_output(df: pd.DataFrame) -> int:
+            if df.empty:
+                return 0
+            good_col_local = PROD_COLS.양품수량 if PROD_COLS.양품수량 in df.columns else gross_col
+            sub = df[df[PROD_COLS.공정].astype(str) == final_proc].copy()
+            return _sum_qty(sub, good_col_local)
 
         left, right = st.columns(2)
-
-        process_order = ["사출", "분리", "하이드", "접착", "누수"]
-
-        def _process_view(df: pd.DataFrame) -> pd.DataFrame:
-            s = summarize_by_process(df)
-            if s.empty:
-                return s
-            s2 = s.copy()
-            known = s2[PROD_COLS.공정].astype(str).isin(process_order)
-            other_qty = int(s2.loc[~known, PROD_COLS.생산수량].sum()) if (~known).any() else 0
-            s2 = s2[known].copy()
-            s2[PROD_COLS.공정] = pd.Categorical(s2[PROD_COLS.공정].astype(str), categories=process_order, ordered=True)
-            s2 = s2.sort_values(PROD_COLS.공정).copy()
-            s2[PROD_COLS.생산수량] = s2[PROD_COLS.생산수량].astype(int)
-            if other_qty > 0:
-                s2 = pd.concat(
-                    [
-                        s2,
-                        pd.DataFrame({PROD_COLS.공정: ["기타"], PROD_COLS.생산수량: [other_qty]}),
-                    ],
-                    ignore_index=True,
-                )
-            return s2.reset_index(drop=True)
-
         with left:
-            st.markdown(f"**전월 ({views.prev_month.start.isoformat()} ~ {views.prev_month.end.isoformat()})**")
-            prev_proc = _process_view(views.prev_month.df)
-            if prev_proc.empty:
-                st.info("전월 실적이 없습니다(집계 기준/데이터를 확인하세요).")
-            else:
-                st.bar_chart(prev_proc.set_index(PROD_COLS.공정)[PROD_COLS.생산수량])
-                st.dataframe(prev_proc, use_container_width=True, hide_index=True)
+            with st.container(border=True):
+                st.markdown(f"**전월 ({views.prev_month.start.isoformat()} ~ {views.prev_month.end.isoformat()})**")
+                prev_table, prev_comp = _yield_table(views.prev_month.df, process_order=process_order)
+                top1, top2 = st.columns(2)
+                top1.metric("총 생산수량", f"{_final_output(views.prev_month.df):,}")
+                top2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
+                st.caption("※ 각 공정 수율 곱 = 종합수율")
+                st.dataframe(prev_table, use_container_width=True, hide_index=True)
 
         with right:
-            st.markdown(f"**당월 ({views.curr_month.start.isoformat()} ~ {views.curr_month.end.isoformat()})**")
-            if views.curr_month.end < views.curr_month.start:
-                st.info("당월은 아직 집계 대상이 없습니다(기준일이 월초이거나, cutoff가 월 시작 이전).")
-            else:
-                curr_proc = _process_view(views.curr_month.df)
-                if curr_proc.empty:
-                    st.info("당월 실적이 없습니다(당일 제외/데이터를 확인하세요).")
-                else:
-                    st.bar_chart(curr_proc.set_index(PROD_COLS.공정)[PROD_COLS.생산수량])
-                    st.dataframe(curr_proc, use_container_width=True, hide_index=True)
+            with st.container(border=True):
+                st.markdown(f"**당월 ({views.curr_month.start.isoformat()} ~ {views.curr_month.end.isoformat()})**")
+                curr_table, curr_comp = _yield_table(views.curr_month.df, process_order=process_order)
+                top1, top2 = st.columns(2)
+                top1.metric("총 생산수량", f"{_final_output(views.curr_month.df):,}")
+                top2.metric("종합 수율", f"{curr_comp*100:.1f}%" if curr_comp is not None else "-")
+                st.caption("※ 각 공정 수율 곱 = 종합수율")
+                st.dataframe(curr_table, use_container_width=True, hide_index=True)
 
                 daily = summarize_daily_total(
-                    views.curr_month.df[views.curr_month.df[PROD_COLS.공정].astype(str).str.contains(final_proc, na=False)].copy()
+                    views.curr_month.df[views.curr_month.df[PROD_COLS.공정].astype(str) == str(view_proc)].copy()
                 )
                 if not daily.empty:
-                    st.markdown("**당월 일자별 합계(누수)**")
-                    st.line_chart(daily.set_index(PROD_COLS.생산일자)[PROD_COLS.생산수량])
+                    st.markdown(f"**일자별 합계({view_proc})**")
+                    st.line_chart(daily.set_index(PROD_COLS.생산일자)[gross_col])
 
         with st.expander("원천 데이터 보기(전월+당월, cutoff 반영)"):
             st.dataframe(
