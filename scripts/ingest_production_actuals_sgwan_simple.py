@@ -21,15 +21,15 @@ def _norm_text(x: object) -> str:
 def _map_process(code: object) -> str:
     s = _norm_text(code)
     if s.startswith("[10]"):
-        return "사출"
+        return "사출조립"
     if s.startswith("[20]"):
         return "분리"
     if s.startswith("[45]"):
-        return "하이드"
+        return "하이드레이션/전면검"
     if s.startswith("[55]"):
-        return "접착"
+        return "접착/멸균"
     if s.startswith("[80]"):
-        return "누수"
+        return "누수/규격검사"
     if s.startswith("[85]"):
         return "포장"
     return s
