@@ -281,27 +281,17 @@ with tabs[0]:
                 k1.metric("총 생산실적(누수/규격검사 양품)", f"{prev_total:,}")
                 k2.metric("종합 수율", f"{prev_comp*100:.1f}%" if prev_comp is not None else "-")
                 st.dataframe(
-                    prev_proc,
+                    prev_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "생산수량": st.column_config.NumberColumn(format=",d"),
-                        "양품수량": st.column_config.NumberColumn(format=",d"),
-                        "수율": st.column_config.NumberColumn(format=".1%"),
-                    },
                 )
 
                 st.markdown("**일자별 집계**")
                 prev_daily = _daily_process_summary(views.prev_month.df)
                 st.dataframe(
-                    prev_daily,
+                    prev_daily.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "생산수량": st.column_config.NumberColumn(format=",d"),
-                        "양품수량": st.column_config.NumberColumn(format=",d"),
-                        "수율": st.column_config.NumberColumn(format=".1%"),
-                    },
                 )
 
         with right:
@@ -316,27 +306,17 @@ with tabs[0]:
                 k1.metric("총 생산실적(누수/규격검사 양품)", f"{curr_total:,}")
                 k2.metric("종합 수율", f"{curr_comp*100:.1f}%" if curr_comp is not None else "-")
                 st.dataframe(
-                    curr_proc,
+                    curr_proc.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "생산수량": st.column_config.NumberColumn(format=",d"),
-                        "양품수량": st.column_config.NumberColumn(format=",d"),
-                        "수율": st.column_config.NumberColumn(format=".1%"),
-                    },
                 )
 
                 st.markdown("**일자별 집계**")
                 curr_daily = _daily_process_summary(views.curr_month.df)
                 st.dataframe(
-                    curr_daily,
+                    curr_daily.style.format({"생산수량": "{:,.0f}", "양품수량": "{:,.0f}", "수율": "{:.1%}"}),
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "생산수량": st.column_config.NumberColumn(format=",d"),
-                        "양품수량": st.column_config.NumberColumn(format=",d"),
-                        "수율": st.column_config.NumberColumn(format=".1%"),
-                    },
                 )
 
         with st.expander("원천 데이터 보기(전월+당월, cutoff 반영)"):
