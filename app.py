@@ -795,69 +795,69 @@ with tabs[1]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
+        left, right = st.columns(2)
+
         # ===== 월별 집계 =====
-        with st.container(border=True):
-            st.markdown("**월별 집계**")
+        with left:
+            with st.container(border=True):
+                st.markdown("**월별 집계**")
 
-            group_cols = ["월"]
-            if "구분" in df.columns:
-                group_cols.append("구분")
-            monthly_agg = {}
-            if "작지번호" in df.columns:
-                monthly_agg["작지건수"] = ("작지번호", "nunique")
-            if "오더수량" in df.columns:
-                monthly_agg["오더수량 합계"] = ("오더수량", "sum")
-            if "수주금액(원)" in df.columns:
-                monthly_agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
-            if "수주금액(달러)" in df.columns:
-                monthly_agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
-
-            monthly = df.groupby(group_cols, dropna=False).agg(**monthly_agg).reset_index()
-            monthly = monthly.sort_values(group_cols).reset_index(drop=True)
-            # 합계 행 추가(월별 집계용)
-            total_row: dict[str, object] = {c: "" for c in group_cols}
-            total_row["월"] = "합계"
-            for c in ["작지건수", "오더수량 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
-                if c in monthly.columns:
-                    total_row[c] = float(monthly[c].sum()) if c != "작지건수" else int(monthly[c].sum())
-            monthly2 = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
-            fmt = {c: "{:,.0f}" for c in monthly2.columns if c not in group_cols}
-            st.dataframe(
-                monthly2.style.format(fmt),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        # ===== 분류요약별 집계 =====
-        with st.container(border=True):
-            st.markdown("**분류요약별 집계**")
-            if "분류요약" not in df.columns:
-                st.info("S관 제품 마스터의 AY열(분류요약) 매핑을 확인하세요. 현재 데이터에 '분류요약' 컬럼이 없습니다.")
-            else:
-                group_cols = ["분류요약"]
-                cat_agg = {}
-                if "작지번호" in df.columns:
-                    cat_agg["작지건수"] = ("작지번호", "nunique")
+                group_cols = ["월"]
+                if "구분" in df.columns:
+                    group_cols.append("구분")
+                monthly_agg = {}
                 if "오더수량" in df.columns:
-                    cat_agg["오더수량 합계"] = ("오더수량", "sum")
+                    monthly_agg["오더수량 합계"] = ("오더수량", "sum")
                 if "수주금액(원)" in df.columns:
-                    cat_agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
+                    monthly_agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
                 if "수주금액(달러)" in df.columns:
-                    cat_agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
+                    monthly_agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
 
-                cat = df.groupby(group_cols, dropna=False).agg(**cat_agg).reset_index()
-                cat = cat.sort_values(group_cols).reset_index(drop=True)
-                total_row = {"분류요약": "합계"}
-                for c in ["작지건수", "오더수량 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
-                    if c in cat.columns:
-                        total_row[c] = float(cat[c].sum()) if c != "작지건수" else int(cat[c].sum())
-                cat2 = pd.concat([cat, pd.DataFrame([total_row])], ignore_index=True)
-                fmt = {c: "{:,.0f}" for c in cat2.columns if c not in group_cols}
+                monthly = df.groupby(group_cols, dropna=False).agg(**monthly_agg).reset_index()
+                monthly = monthly.sort_values(group_cols).reset_index(drop=True)
+                # 합계 행 추가(월별 집계용)
+                total_row: dict[str, object] = {c: "" for c in group_cols}
+                total_row["월"] = "합계"
+                for c in ["오더수량 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
+                    if c in monthly.columns:
+                        total_row[c] = float(monthly[c].sum())
+                monthly2 = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
+                fmt = {c: "{:,.0f}" for c in monthly2.columns if c not in group_cols}
                 st.dataframe(
-                    cat2.style.format(fmt),
+                    monthly2.style.format(fmt),
                     use_container_width=True,
                     hide_index=True,
                 )
+
+        # ===== 분류요약별 집계 =====
+        with right:
+            with st.container(border=True):
+                st.markdown("**분류요약별 집계**")
+                if "분류요약" not in df.columns:
+                    st.info("S관 제품 마스터의 AY열(분류요약) 매핑을 확인하세요. 현재 데이터에 '분류요약' 컬럼이 없습니다.")
+                else:
+                    group_cols = ["분류요약"]
+                    cat_agg = {}
+                    if "오더수량" in df.columns:
+                        cat_agg["오더수량 합계"] = ("오더수량", "sum")
+                    if "수주금액(원)" in df.columns:
+                        cat_agg["수주금액(원) 합계"] = ("수주금액(원)", "sum")
+                    if "수주금액(달러)" in df.columns:
+                        cat_agg["수주금액(달러) 합계"] = ("수주금액(달러)", "sum")
+
+                    cat = df.groupby(group_cols, dropna=False).agg(**cat_agg).reset_index()
+                    cat = cat.sort_values(group_cols).reset_index(drop=True)
+                    total_row = {"분류요약": "합계"}
+                    for c in ["오더수량 합계", "수주금액(원) 합계", "수주금액(달러) 합계"]:
+                        if c in cat.columns:
+                            total_row[c] = float(cat[c].sum())
+                    cat2 = pd.concat([cat, pd.DataFrame([total_row])], ignore_index=True)
+                    fmt = {c: "{:,.0f}" for c in cat2.columns if c not in group_cols}
+                    st.dataframe(
+                        cat2.style.format(fmt),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
         # ===== 원천(필터) =====
         with st.container(border=True):
