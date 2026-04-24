@@ -197,6 +197,92 @@ def load_order_status_raw(
     return df
 
 
+def _normalize_misc_orders_for_dashboard(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    out = df.copy()
+
+    # Derive month key (prefer due date -> request date)
+    due_dt = (
+        pd.to_datetime(out["납기일자"], errors="coerce")
+        if "납기일자" in out.columns
+        else pd.Series([pd.NaT] * len(out), index=out.index)
+    )
+    req_dt = (
+        pd.to_datetime(out["요청일자"], errors="coerce")
+        if "요청일자" in out.columns
+        else pd.Series([pd.NaT] * len(out), index=out.index)
+    )
+    base_dt = due_dt
+    if base_dt.isna().all():
+        base_dt = req_dt
+    month_dt = base_dt.dt.to_period("M").dt.to_timestamp()
+
+    out["__month_date__"] = month_dt
+    out["연도"] = base_dt.dt.year
+
+    # Dashboard expects these columns for monthly aggregation/view
+    out["구분"] = "기타수주"
+
+    job_id = out.get("생산코드")
+    if job_id is None:
+        job_id = out.get("판매코드")
+    if job_id is None:
+        job_id = pd.Series([""] * len(out), index=out.index)
+    job_id = job_id.map(_norm_text)
+    if "순번" in out.columns:
+        job_id = job_id + "-" + out["순번"].astype("string").fillna("")
+    out["작지번호"] = job_id
+
+    # Quantities: prefer PCS, else PACK * 입수(낱개)
+    qty_pcs = (
+        pd.to_numeric(out["수량(PCS)"], errors="coerce")
+        if "수량(PCS)" in out.columns
+        else pd.Series([pd.NA] * len(out), index=out.index)
+    )
+    if qty_pcs.isna().all():
+        qty_pack = (
+            pd.to_numeric(out["수량(PACK)"], errors="coerce")
+            if "수량(PACK)" in out.columns
+            else pd.Series([pd.NA] * len(out), index=out.index)
+        )
+        pack_in = (
+            pd.to_numeric(out["입수(낱개)"], errors="coerce")
+            if "입수(낱개)" in out.columns
+            else pd.Series([pd.NA] * len(out), index=out.index)
+        )
+        qty_pcs = qty_pack * pack_in
+    out["오더수량"] = qty_pcs.fillna(0)
+
+    out["수주금액(원)"] = 0
+    out["수주금액(달러)"] = 0
+
+    if "상태" in out.columns:
+        out["현재상태"] = out["상태"]
+
+    # Align key date columns used in the table (keep originals too)
+    if "요청일자" in out.columns:
+        out["수주 전송일"] = req_dt
+    if "납기일자" in out.columns:
+        out["영업출고요청일"] = due_dt
+
+    if "포장완료" in out.columns:
+        done = pd.to_numeric(out["포장완료"], errors="coerce").fillna(0)
+        out["포장 진도율"] = (done > 0).astype(int) * 100
+
+    # Domestic request: normalize country if possible
+    if "국내/해외" in out.columns and "국가" not in out.columns:
+        out["국가"] = out["국내/해외"].map(lambda x: "대한민국" if _norm_text(x) == "국내" else _norm_text(x))
+
+    if "고객" not in out.columns:
+        out["고객"] = "국내요청"
+    if "담당자" not in out.columns and "생성자" in out.columns:
+        out["담당자"] = out["생성자"]
+
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: float | None = None) -> pd.DataFrame:
     # cache_bust: 파일 수정시간 등을 넘겨 캐시가 파일 변경을 감지하도록 함.
@@ -279,9 +365,17 @@ with st.sidebar:
             prefer = ["수주현황", "수주 현황", "수주"]
             default_sheet = next((s for s in prefer if s in sheet_names), sheet_names[0])
             order_sheet = st.selectbox("수주현황 시트", options=sheet_names, index=sheet_names.index(default_sheet))
+
+            misc_prefer = ["기타수주현황", "기타 수주현황", "기타수주"]
+            misc_sheet = next((s for s in misc_prefer if s in sheet_names), None)
+            if misc_sheet is None:
+                misc_sheet = next((s for s in sheet_names if "기타수주" in s.replace(" ", "")), None)
+            if misc_sheet:
+                st.caption(f"기타수주 시트 포함: {misc_sheet}")
         else:
             st.info("엑셀에 '수주현황' 시트를 저장/업로드한 뒤 다시 확인하세요.")
             order_sheet = None
+            misc_sheet = None
         master_xlsx = st.text_input("S관 제품 마스터", value="S관 생산 제품 리스트.xlsx")
 
 if source == "CSV":
@@ -637,12 +731,35 @@ with tabs[1]:
             sheet_name=order_sheet,
             cache_bust=order_mtime,
         )
+
+        misc_raw = pd.DataFrame()
+        misc_s = pd.DataFrame()
+        if misc_sheet:
+            misc_raw = load_order_status_raw(
+                order_book_xlsx,
+                sheet_name=misc_sheet,
+                header_row_1based=1,
+                cache_bust=order_mtime,
+            )
+            misc_s = load_order_status_sgwan(
+                order_book_xlsx,
+                master_xlsx,
+                sheet_name=misc_sheet,
+                header_row_1based=1,
+                cache_bust=order_mtime,
+            )
+            misc_s = _normalize_misc_orders_for_dashboard(misc_s)
     except Exception as e:
         st.error(f"수주현황 로드 실패: {e}")
         orders_raw = pd.DataFrame()
         orders_s = pd.DataFrame()
+        misc_raw = pd.DataFrame()
+        misc_s = pd.DataFrame()
 
-    if orders_s.empty:
+    orders_raw_all = pd.concat([orders_raw, misc_raw], ignore_index=True) if not misc_raw.empty else orders_raw
+    orders_s_all = pd.concat([orders_s, misc_s], ignore_index=True, sort=False) if not misc_s.empty else orders_s
+
+    if orders_s_all.empty:
         # If raw exists but filtered is empty, most likely sheet/headers mismatch or master matching fails.
         msg = "S관 수주현황 데이터가 없습니다(매칭 결과 0행이거나 파일/시트/컬럼을 확인하세요)."
         try:
@@ -655,9 +772,9 @@ with tabs[1]:
             pass
         st.info(msg)
     else:
-        if not orders_raw.empty:
-            st.caption(f"S관 제품 매칭 행수: {len(orders_s):,} / 전체 행수: {len(orders_raw):,}")
-        df = orders_s.copy()
+        if not orders_raw_all.empty:
+            st.caption(f"S관 제품 매칭 행수: {len(orders_s_all):,} / 전체 행수: {len(orders_raw_all):,}")
+        df = orders_s_all.copy()
 
         # Parse month
         if "__month_date__" in df.columns:
