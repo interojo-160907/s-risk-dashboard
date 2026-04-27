@@ -1209,6 +1209,7 @@ with tabs[2]:
 
             # (제품명코드, 영업출고요청일) 단위로 중복 집계
             if not o.empty and "영업출고요청일" in o.columns:
+                code_counts = o.groupby("제품명코드", dropna=False).size().to_dict() if "제품명코드" in o.columns else {}
                 agg = {
                     "작지번호": lambda s: ", ".join([x for x in pd.Series(s).dropna().astype(str).unique().tolist()][:5]),
                     "고객": lambda s: ", ".join([x for x in pd.Series(s).dropna().astype(str).unique().tolist()][:3]),
@@ -1279,6 +1280,22 @@ with tabs[2]:
                 drop_cols = [c for c in ["__고객납기_dt__", "__요청일_dt__"] if c in exact.columns]
                 action_df = exact.drop(columns=drop_cols, errors="ignore")
 
+        # 수주현황 고객이 None/NaN인 건들 원인 표시(품명 매핑/요청일 매칭 문제)
+        if not action_df.empty and "수주현황_고객" in action_df.columns:
+            miss = action_df["수주현황_고객"].isna()
+            if miss.any():
+                def _reason(r: pd.Series) -> str:
+                    code = r.get("제품명코드")
+                    if code is None or str(code).strip() == "" or str(code).lower() == "nan":
+                        return "제품명코드 없음"
+                    if "code_counts" in locals() and str(code) not in code_counts:
+                        return "수주현황에 제품 없음(품명/마스터 매핑)"
+                    return "요청일 매칭 실패(±30일 내 없음)"
+
+                action_df = action_df.copy()
+                action_df.loc[miss, "수주현황_미매칭사유"] = action_df[miss].apply(_reason, axis=1)
+                action_df.loc[~miss, "수주현황_미매칭사유"] = ""
+
         t1, t2, t3, t4 = st.tabs(["액션리스트", "리스크요약(7일)", "변동분석_총합계", "변동분석_포장"])
         with t1:
             st.caption("업무 처리용(최신 기준일자, 총합계 이벤트)")
@@ -1298,6 +1315,7 @@ with tabs[2]:
                 "제품명코드",
                 "제품명_마스터",
                 "수주현황_고객",
+                "수주현황_미매칭사유",
                 "요청납기일",
                 "변경 납기일(당일 종료예정일)",
                 "기존 납기일(전일 종료예정일)",
@@ -1308,6 +1326,10 @@ with tabs[2]:
                 "SKU수",
             ]
             show_cols = [c for c in show_cols if c in view.columns]
+            if "수주현황_고객" in view.columns:
+                n_none = int(view["수주현황_고객"].isna().sum())
+                if n_none > 0:
+                    st.warning(f"수주현황 고객 매칭 실패: {n_none:,}건 (수주현황/마스터 매핑 또는 요청일 매칭 문제)")
             st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
         with t2:
             st.caption("불안정 수주 요약(최근 7일, 총합계 기준)")
