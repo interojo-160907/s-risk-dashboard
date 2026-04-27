@@ -1285,9 +1285,10 @@ with tabs[2]:
             view = action_df.copy()
             if "영업출고요청일" in view.columns:
                 view["요청납기일"] = pd.to_datetime(view["영업출고요청일"], errors="coerce").dt.date
-            if "요청납기일" not in view.columns or view["요청납기일"].isna().all():
-                if "고객납기일" in view.columns:
-                    view["요청납기일"] = pd.to_datetime(view["고객납기일"], errors="coerce").dt.date
+            if "고객납기일" in view.columns:
+                # 수주현황 매칭 실패(영업출고요청일 없음)인 경우 APS 고객납기일로 보완
+                view["요청납기일"] = pd.to_datetime(view.get("요청납기일"), errors="coerce").dt.date
+                view["요청납기일"] = view["요청납기일"].fillna(pd.to_datetime(view["고객납기일"], errors="coerce").dt.date)
 
             # 표준 표시 컬럼(간소화)
             show_cols = [
@@ -1305,9 +1306,6 @@ with tabs[2]:
                 "원인",
                 "조치유형",
                 "SKU수",
-                "수주현황_작지번호",
-                "협의상태",
-                "비고",
             ]
             show_cols = [c for c in show_cols if c in view.columns]
             st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
