@@ -120,59 +120,133 @@ def _build_long_for_sheet(
     if 기준일자 is None:
         raise ValueError(f"날짜 시트명이 아닙니다: {sheet_name!r}")
 
-    wide = pd.read_excel(xlsx_path, sheet_name=sheet_name, header=[0, 1])  # type: ignore[call-arg]
-    if wide.empty:
+    raise RuntimeError(
+        "_build_long_for_sheet는 더 이상 직접 호출되지 않습니다. "
+        "build_aps_long_table에서 openpyxl 워크북을 1회만 열어 처리합니다."
+    )
+
+
+def _build_long_for_ws(
+    ws: object,
+    *,
+    sheet_name: str,
+    기준일자: date,
+    scope_processes: Iterable[str],
+) -> pd.DataFrame:
+    header_rows = list(ws.iter_rows(min_row=1, max_row=2, values_only=True))
+    if len(header_rows) < 2:
         return pd.DataFrame()
 
-    wide = _filter_summary_rows(wide)
-    if wide.empty:
-        return pd.DataFrame()
+    r1 = list(header_rows[0])
+    r2 = list(header_rows[1])
+    proc = ""
+    tuples: list[tuple[str, str]] = []
+    for a, b in zip(r1, r2, strict=False):
+        if a is not None and str(a).strip() != "":
+            proc = str(a).strip()
+        sub = "" if b is None else str(b).strip()
+        tuples.append((proc, sub))
 
-    meta_map = {
+    idx_map: dict[tuple[str, str], int] = {t: i for i, t in enumerate(tuples)}
+
+    meta_keys = {
         (META_GROUP, "수주번호"): COLS.수주번호,
         (META_GROUP, "수요 제품 코드"): COLS.수요제품코드,
         (META_GROUP, "제품 이름"): COLS.제품이름,
         (META_GROUP, "납기일"): COLS.납기일,
     }
-    missing_meta = [k for k in meta_map if k not in wide.columns]
+    missing_meta = [k for k in meta_keys if k not in idx_map]
     if missing_meta:
         raise ValueError(f"{sheet_name}: 메타 컬럼 누락: {missing_meta}")
 
-    meta = wide[list(meta_map.keys())].copy()
-    meta.columns = [meta_map[c] for c in meta.columns]
-    meta[COLS.기준일자] = 기준일자
-    meta[COLS.납기일] = _to_date_series(meta[COLS.납기일])
+    meta_idxs = {meta_keys[k]: idx_map[k] for k in meta_keys}
+    proc_cols: dict[str, tuple[int | None, int | None]] = {}
+    for p in scope_processes:
+        qty_idx = idx_map.get((p, "생산 수량"))
+        end_idx = idx_map.get((p, "종료일"))
+        proc_cols[p] = (qty_idx, end_idx)
 
-    records: list[pd.DataFrame] = []
-    for proc in scope_processes:
-        qty_col = (proc, "생산 수량")
-        end_col = (proc, "종료일")
-        if qty_col not in wide.columns or end_col not in wide.columns:
+    rows: list[dict] = []
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        su = row[meta_idxs[COLS.수주번호]]
+        if su is None:
             continue
-        part = meta.copy()
-        part[COLS.공정코드] = proc
-        part[COLS.필요수량] = pd.to_numeric(wide[qty_col], errors="coerce")
-        part[COLS.종료예정일] = _to_date_series(wide[end_col])
-        records.append(part)
+        su_s = str(su).strip()
+        if not su_s or ("합계" in su_s) or ("총합계" in su_s):
+            continue
 
-    if not records:
+        demand_code = row[meta_idxs[COLS.수요제품코드]]
+        prod_name = row[meta_idxs[COLS.제품이름]]
+        due = row[meta_idxs[COLS.납기일]]
+
+        for proc_name, (qty_i, end_i) in proc_cols.items():
+            if qty_i is None and end_i is None:
+                continue
+            qty = row[qty_i] if qty_i is not None else None
+            end = row[end_i] if end_i is not None else None
+            if qty in [None, ""] and end in [None, ""]:
+                continue
+
+            rows.append(
+                {
+                    COLS.기준일자: 기준일자,
+                    COLS.수주번호: su_s,
+                    COLS.수요제품코드: None if demand_code is None else str(demand_code).strip(),
+                    COLS.제품이름: None if prod_name is None else str(prod_name).strip(),
+                    COLS.납기일: due,
+                    COLS.공정코드: proc_name,
+                    COLS.필요수량: qty,
+                    COLS.종료예정일: end,
+                }
+            )
+
+    if not rows:
         return pd.DataFrame()
-    return pd.concat(records, ignore_index=True)
+
+    out = pd.DataFrame(rows)
+    out[COLS.납기일] = _to_date_series(out[COLS.납기일])
+    out[COLS.종료예정일] = _to_date_series(out[COLS.종료예정일])
+    out[COLS.필요수량] = pd.to_numeric(out[COLS.필요수량], errors="coerce")
+    return out
 
 
 def build_aps_long_table(
     xlsx_path: str | Path,
     *,
     scope_processes: Iterable[str] = ("총합계", "[85]포장"),
+    window_days: int | None = 8,
 ) -> pd.DataFrame:
     master = _read_master_products(xlsx_path)
     managed_codes = set(master["제품명코드"].astype(str).str.strip().tolist())
 
-    longs: list[pd.DataFrame] = []
-    for sheet in _date_sheet_names(xlsx_path):
-        longs.append(_build_long_for_sheet(xlsx_path, sheet, scope_processes=scope_processes))
+    # 날짜 시트 파싱 + 성능 최적화: 워크북은 1회만 open
+    try:
+        import openpyxl  # type: ignore[import-not-found]
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("openpyxl이 필요합니다(requirements.txt 확인)") from e
 
-    out = pd.concat([x for x in longs if not x.empty], ignore_index=True) if longs else pd.DataFrame()
+    wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+    try:
+        pairs2: list[tuple[str, date]] = []
+        for s in wb.sheetnames:
+            if s == "제품명등록":
+                continue
+            d = parse_sheet_date(str(s))
+            if d is not None:
+                pairs2.append((str(s), d))
+        pairs2.sort(key=lambda x: x[1])
+
+        if window_days is not None and window_days > 0:
+            pairs2 = pairs2[-window_days:]
+
+        longs: list[pd.DataFrame] = []
+        for sheet, d in pairs2:
+            ws = wb[sheet]
+            longs.append(_build_long_for_ws(ws, sheet_name=sheet, 기준일자=d, scope_processes=scope_processes))
+    finally:
+        wb.close()
+
+    out = pd.concat([x for x in longs if not x.empty], ignore_index=True) if "longs" in locals() else pd.DataFrame()
     if out.empty:
         return out
 
@@ -337,8 +411,9 @@ def analyze_workbook(
     xlsx_path: str | Path,
     *,
     scope_processes: Iterable[str] = ("총합계", "[85]포장"),
+    window_days: int | None = 8,
 ) -> dict[str, pd.DataFrame]:
-    long_df = build_aps_long_table(xlsx_path, scope_processes=scope_processes)
+    long_df = build_aps_long_table(xlsx_path, scope_processes=scope_processes, window_days=window_days)
     deltas = add_daily_deltas(long_df)
     classified = classify_cause(deltas)
 

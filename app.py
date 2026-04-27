@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import json
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from risk_dashboard.aps_cache import default_cache_paths as aps_default_cache_paths
+from risk_dashboard.aps_cache import load_any_tables as aps_load_any_tables
 from risk_dashboard.aps_cache import load_cached_tables as aps_load_cached_tables
 from risk_dashboard.aps_cache import save_cached_tables as aps_save_cached_tables
 from risk_dashboard.aps_cache import signature as aps_signature
@@ -413,6 +417,45 @@ def load_orders_sgwan_for_join(
             out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
 
     return out
+
+
+def _aps_status_path(data_dir: str | Path = "data") -> Path:
+    return Path(data_dir) / "aps_risk_cache_status.json"
+
+
+def _aps_lock_path(data_dir: str | Path = "data") -> Path:
+    return Path(data_dir) / "aps_risk_cache.lock"
+
+
+def _read_json_if_exists(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _launch_aps_cache_build(*, input_path: Path, scope: str, days: int = 8) -> None:
+    cmd = [
+        sys.executable,
+        str(Path("scripts") / "build_aps_risk_cache.py"),
+        "--input",
+        str(input_path),
+        "--scope",
+        scope,
+        "--days",
+        str(days),
+    ]
+    flags = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    subprocess.Popen(  # noqa: S603
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
 
 
 with st.sidebar:
@@ -1052,36 +1095,37 @@ with tabs[2]:
         sig = aps_signature(aps_path)
 
         tables = aps_load_cached_tables(cache_paths, sig=sig, scope_key=scope_key)
+        stale_tables = None if tables is not None else aps_load_any_tables(cache_paths)
+
+        lock_path = _aps_lock_path("data")
+        status_path = _aps_status_path("data")
+        status_obj = _read_json_if_exists(status_path) or {}
+        is_running = lock_path.exists() or status_obj.get("state") == "running"
+
         if tables is None:
-            st.info("아직 분석 캐시가 없습니다. 아래 버튼을 눌러 1회 분석을 실행하세요(이후엔 즉시 로드됩니다).")
-            run = st.button("APS 리스크 분석 실행(캐시 생성)")
-            if run:
-                with st.spinner("APS 리스크 분석 중..."):
-                    tables = load_aps_risk_tables(
-                        str(aps_path),
-                        scope_processes=scope_processes,
-                        cache_bust=sig.mtime,
-                    )
-                try:
-                    aps_save_cached_tables(cache_paths, sig=sig, scope_key=scope_key, tables=tables)
-                except Exception as e:
-                    st.warning(f"캐시 저장 실패(표시는 정상): {e}")
-        else:
-            col_a, col_b = st.columns([1, 1])
-            with col_a:
-                if st.button("재분석(캐시 갱신)"):
-                    with st.spinner("APS 리스크 재분석 중..."):
-                        tables = load_aps_risk_tables(
-                            str(aps_path),
-                            scope_processes=scope_processes,
-                            cache_bust=sig.mtime,
-                        )
-                    try:
-                        aps_save_cached_tables(cache_paths, sig=sig, scope_key=scope_key, tables=tables)
-                    except Exception as e:
-                        st.warning(f"캐시 저장 실패(표시는 정상): {e}")
-            with col_b:
-                st.caption(f"캐시 파일: {cache_paths.data_pkl}")
+            # 자동 백그라운드 분석 시작(중복 방지)
+            if not is_running:
+                _launch_aps_cache_build(input_path=aps_path, scope=scope_key, days=8)
+                is_running = True
+                st.info("APS 파일 변경을 감지해 백그라운드 분석을 시작했습니다. (이 탭은 이전 캐시로 먼저 표시됩니다)")
+            else:
+                st.info("백그라운드 분석이 진행 중입니다. 캐시 생성이 끝나면 자동으로 최신 결과가 표시됩니다.")
+
+            if status_obj:
+                st.caption(f"상태: {status_obj.get('state','-')} | 시작: {status_obj.get('started_at','-')} | 종료: {status_obj.get('finished_at','-')}")
+                if status_obj.get("state") == "error":
+                    st.warning(f"분석 실패: {status_obj.get('error')}")
+
+            if st.button("새로고침"):
+                st.rerun()
+
+            tables = stale_tables
+
+        if not tables:
+            st.stop()
+
+        if tables is not None:
+            st.caption(f"캐시 파일: {cache_paths.data_pkl}")
 
         if not tables:
             st.stop()

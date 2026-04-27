@@ -66,6 +66,22 @@ def load_cached_tables(paths: ApsCachePaths, *, sig: FileSignature, scope_key: s
     return out or None
 
 
+def load_any_tables(paths: ApsCachePaths) -> dict[str, pd.DataFrame] | None:
+    if not paths.data_pkl.exists():
+        return None
+    try:
+        obj: Any = pd.read_pickle(paths.data_pkl)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    out: dict[str, pd.DataFrame] = {}
+    for k, v in obj.items():
+        if isinstance(v, pd.DataFrame):
+            out[str(k)] = v
+    return out or None
+
+
 def save_cached_tables(
     paths: ApsCachePaths,
     *,
@@ -83,4 +99,3 @@ def save_cached_tables(
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     paths.meta_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
