@@ -45,7 +45,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="생산실적현황(간편)_S관.xlsx(전월/당월) → production_actuals(rolling 2개월) 생성"
     )
-    ap.add_argument("--input", default="생산실적현황(간편)_S관.xlsx", help="엑셀 경로")
+    ap.add_argument("--input", default="업데이트 데이터/생산실적현황(간편)_S관.xlsx", help="엑셀 경로")
     ap.add_argument("--sheets", default="전월,당월", help="처리할 시트(쉼표구분)")
     ap.add_argument("--status", default="확인", help="상태 필터(기본: 확인)")
     ap.add_argument("--good-col", default="샘플제외 양품수량", help="양품(실적) 컬럼(기본: 샘플제외 양품수량)")

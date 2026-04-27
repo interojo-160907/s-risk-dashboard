@@ -1,6 +1,6 @@
 # S관 생산실적 대시보드
 
-`생산실적현황(간편)_S관.xlsx` 또는 CSV를 기반으로, **전월(월 전체) vs 당월(MTD, 기준일-1까지/당일 제외)** 생산실적을 Streamlit 대시보드로 보여줍니다.
+`업데이트 데이터/생산실적현황(간편)_S관.xlsx` 또는 CSV를 기반으로, **전월(월 전체) vs 당월(MTD, 기준일-1까지/당일 제외)** 생산실적을 Streamlit 대시보드로 보여줍니다.
 
 ## 빠른 시작
 
@@ -36,10 +36,20 @@ python .\scripts\ingest_production_actuals_sgwan_simple.py
 
 ### order_status_by_item_filtered.xlsx에서 S관 제품만 추출
 
-`order_status_by_item_filtered.xlsx`의 `품명`을 `S관 생산 제품 리스트.xlsx`의 `제품명`과 매칭해서, S관 생산 제품 행만 `data/order_status_by_item_filtered_sgwan.csv`로 생성합니다.
+`order_status_by_item_filtered.xlsx`의 `품명`을 `업데이트 데이터/S관 생산 제품 리스트.xlsx`의 `제품명`과 매칭해서, S관 생산 제품 행만 `data/order_status_by_item_filtered_sgwan.csv`로 생성합니다.
 
 ```powershell
 python .\scripts\ingest_order_status_by_item_filtered_sgwan.py
+```
+
+### APS 리스크관리(원복 엑셀 1개)
+
+`업데이트 데이터/APS 변동사항 체크.xlsx`만 갱신하면, 대시보드의 `APS 리스크관리` 탭에서 `액션리스트/리스크요약`을 확인할 수 있습니다.
+
+엑셀로 바로 뽑기:
+
+```powershell
+python .\scripts\analyze_aps_variation.py
 ```
 
 ## GitHub에 올리기(로컬 → 원격)

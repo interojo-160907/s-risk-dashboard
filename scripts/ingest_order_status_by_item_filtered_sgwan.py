@@ -67,7 +67,7 @@ def main() -> int:
     ap.add_argument("--header-row", type=int, default=2, help="컬럼행(1-based). 기본: 2행")
     ap.add_argument("--item-name-col", default="품명", help="품명 컬럼명(기본: 품명)")
 
-    ap.add_argument("--master", default="S관 생산 제품 리스트.xlsx", help="마스터 엑셀 경로")
+    ap.add_argument("--master", default="업데이트 데이터/S관 생산 제품 리스트.xlsx", help="마스터 엑셀 경로")
     ap.add_argument("--master-name-col", default="제품명", help="마스터 제품명 컬럼명(기본: 제품명)")
     ap.add_argument("--master-plant-filter", default="S관", help="공장구분 필터 문자열(기본: S관)")
 
@@ -134,4 +134,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

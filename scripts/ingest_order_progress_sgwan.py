@@ -29,8 +29,8 @@ from risk_dashboard.schema import APS_REQUIRED_COLS  # noqa: E402
 def main() -> int:
     logger = get_logger("ingest.order_progress", log_file="logs/ingest_order_progress.log")
     ap = argparse.ArgumentParser(description="주문별 공정진도 엑셀(날짜 시트) → S관 APS 스냅샷 append")
-    ap.add_argument("--progress-xlsx", default="주문별 공정진도.xlsx", help="주문별 공정진도 엑셀 경로")
-    ap.add_argument("--master-xlsx", default="S관 생산 제품 리스트.xlsx", help="S관 제품 마스터 엑셀 경로")
+    ap.add_argument("--progress-xlsx", default="업데이트 데이터/주문별 공정진도.xlsx", help="주문별 공정진도 엑셀 경로")
+    ap.add_argument("--master-xlsx", default="업데이트 데이터/S관 생산 제품 리스트.xlsx", help="S관 제품 마스터 엑셀 경로")
     ap.add_argument("--data-dir", default="data", help="저장 폴더(기본: data)")
     ap.add_argument("--sheet", default=None, help="특정 시트명만 처리(미지정 시 날짜형 시트 전부)")
     ap.add_argument("--dry-run", action="store_true", help="append 하지 않고 요약만 출력")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+from risk_dashboard.aps_variation import analyze_workbook as analyze_aps_workbook
 from risk_dashboard.io import default_data_paths, load_production_actuals
 from risk_dashboard.logging_utils import get_logger
 from risk_dashboard.production import month_end, month_start, prev_month_range
@@ -95,6 +97,23 @@ def _excel_upload_time_kst(path: Path) -> str | None:
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return None
+
+
+UPDATE_DATA_DIR = Path("업데이트 데이터")
+
+
+def _pick_input_path(filename: str) -> Path:
+    """
+    사용자가 갱신해야 하는 입력 엑셀은 기본적으로 `업데이트 데이터/`에 둡니다.
+    (기존 루트 경로도 남아있으면 하위호환으로 사용)
+    """
+    new_path = UPDATE_DATA_DIR / filename
+    old_path = Path(filename)
+    if new_path.exists():
+        return new_path
+    if old_path.exists():
+        return old_path
+    return new_path
 
 
 @st.cache_data(show_spinner=False)
@@ -323,10 +342,21 @@ def load_prod_from_excel(prod_xlsx: str, *, status: str = "확인", cache_bust: 
     return out[cols].copy()
 
 
+@st.cache_data(show_spinner=False)
+def load_aps_risk_tables(
+    aps_xlsx: str,
+    *,
+    scope_processes: tuple[str, ...],
+    cache_bust: float | None = None,
+) -> dict[str, pd.DataFrame]:
+    _ = cache_bust
+    return analyze_aps_workbook(aps_xlsx, scope_processes=scope_processes)
+
+
 with st.sidebar:
     st.header("데이터")
     default_prod = Path("data/production_actuals_recent.csv")
-    default_excel = Path("생산실적현황(간편)_S관.xlsx")
+    default_excel = _pick_input_path("생산실적현황(간편)_S관.xlsx")
     # 원천은 '생산실적현황(간편)_S관.xlsx'를 우선으로 사용(존재하면 기본값을 엑셀로).
     default_source_idx = 1 if default_excel.exists() else 0
     source = st.radio("소스", ["CSV", "엑셀"], index=default_source_idx, horizontal=True)
@@ -369,7 +399,7 @@ with st.sidebar:
             st.info("엑셀에 '수주현황' 시트를 저장/업로드한 뒤 다시 확인하세요.")
             order_sheet = None
             misc_sheet = None
-        master_xlsx = st.text_input("S관 제품 마스터", value="S관 생산 제품 리스트.xlsx")
+        master_xlsx = st.text_input("S관 제품 마스터", value=str(_pick_input_path("S관 생산 제품 리스트.xlsx")))
 
 if source == "CSV":
     logger.info("source=CSV | prod=%s", prod_path)
@@ -408,7 +438,7 @@ prod_df = _normalize_process_names(prod_df)
 with st.sidebar:
     asof = st.date_input("기준일", value=date.today())
 
-tabs = st.tabs(["S관 실적", "S관 수주현황"])
+tabs = st.tabs(["S관 실적", "S관 수주현황", "APS 리스크관리"])
 
 with tabs[0]:
     st.subheader("S관 생산실적 현황(간편)")
@@ -420,7 +450,7 @@ with tabs[0]:
         cutoff = asof - timedelta(days=1)
 
         # 업로드(원천 엑셀 파일 수정시간 기준) 표시
-        excel_path = Path(prod_xlsx)
+        excel_path = Path(prod_xlsx) if source == "엑셀" else Path(prod_path)
         uploaded_at = _excel_upload_time_kst(excel_path)
         if uploaded_at:
             st.caption(f"생산실적 업로드 시간 : {uploaded_at} (한국시간)")
@@ -712,7 +742,7 @@ with tabs[1]:
     st.caption("수주현황 시트의 품명을 S관 제품 마스터(제품명)와 매칭한 행만 집계합니다.")
 
     if not order_sheet:
-        st.warning("수주현황 시트를 선택할 수 없습니다. '생산실적현황(간편)_S관.xlsx'에 '수주현황' 시트를 저장/업로드한 뒤, 사이드바에서 시트를 선택해주세요.")
+        st.warning("수주현황 시트를 선택할 수 없습니다. '업데이트 데이터/생산실적현황(간편)_S관.xlsx'에 '수주현황' 시트를 저장/업로드한 뒤, 사이드바에서 시트를 선택해주세요.")
         st.stop()
 
     try:
@@ -918,4 +948,76 @@ with tabs[1]:
             df_view[show_cols].style.format(fmt),
             use_container_width=True,
             hide_index=True,
+        )
+
+with tabs[2]:
+    st.subheader("APS 리스크관리")
+    st.caption("원복 엑셀 1개(`APS 변동사항 체크.xlsx`)로 변동 감지 → 원인 분류 → 리스크/액션 리스트까지 생성합니다.")
+
+    st.markdown("**업데이트할 파일 위치**")
+    st.code(str(UPDATE_DATA_DIR), language=None)
+
+    aps_default = _pick_input_path("APS 변동사항 체크.xlsx")
+    aps_xlsx = st.text_input("APS 변동사항 체크.xlsx", value=str(aps_default))
+
+    aps_path = Path(aps_xlsx)
+    if not aps_path.exists():
+        st.warning(f"파일을 찾지 못했습니다: {aps_path}")
+        st.info("`업데이트 데이터` 폴더에 `APS 변동사항 체크.xlsx`를 넣어주세요.")
+    else:
+        uploaded_at = _excel_upload_time_kst(aps_path)
+        if uploaded_at:
+            st.caption(f"APS 엑셀 수정/업로드 시간: {uploaded_at} (한국시간)")
+
+        scope = st.radio("스코프(공정)", ["기본(총합계+[85]포장)", "전체"], index=0, horizontal=True)
+        if scope.startswith("기본"):
+            scope_processes = ("총합계", "[85]포장")
+        else:
+            xl = pd.ExcelFile(aps_path)
+            date_sheets = [s for s in xl.sheet_names if s != "제품명등록" and str(s).isdigit()]
+            if not date_sheets:
+                st.error("날짜 시트를 찾지 못했습니다(예: 260427 또는 20260427).")
+                scope_processes = ("총합계", "[85]포장")
+            else:
+                sample = pd.read_excel(aps_path, sheet_name=date_sheets[-1], header=[0, 1], nrows=1)
+                procs = [c[0] for c in sample.columns if c[0] != "공정 코드:"]
+                scope_processes = tuple(dict.fromkeys(procs).keys())
+
+        if st.button("APS 리스크 분석 새로고침"):
+            st.cache_data.clear()
+            st.rerun()
+
+        with st.spinner("APS 리스크 분석 중..."):
+            tables = load_aps_risk_tables(
+                str(aps_path),
+                scope_processes=scope_processes,
+                cache_bust=aps_path.stat().st_mtime,
+            )
+
+        action_df = tables.get("액션리스트", pd.DataFrame())
+        risk_df = tables.get("리스크요약", pd.DataFrame())
+        total_df = tables.get("변동분석_총합계", pd.DataFrame())
+        pack_df = tables.get("변동분석_포장", pd.DataFrame())
+
+        t1, t2, t3, t4 = st.tabs(["액션리스트", "리스크요약(7일)", "변동분석_총합계", "변동분석_포장"])
+        with t1:
+            st.caption("업무 처리용(최신 기준일자, 총합계 이벤트)")
+            st.dataframe(action_df, use_container_width=True, hide_index=True)
+        with t2:
+            st.caption("불안정 수주 요약(최근 7일, 총합계 기준)")
+            st.dataframe(risk_df, use_container_width=True, hide_index=True)
+        with t3:
+            st.dataframe(total_df, use_container_width=True, hide_index=True)
+        with t4:
+            st.dataframe(pack_df, use_container_width=True, hide_index=True)
+
+        out_buf = io.BytesIO()
+        with pd.ExcelWriter(out_buf, engine="openpyxl") as w:
+            for name, df in tables.items():
+                df.to_excel(w, sheet_name=name, index=False)
+        st.download_button(
+            "결과 엑셀 다운로드",
+            data=out_buf.getvalue(),
+            file_name="aps_risk_result.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
