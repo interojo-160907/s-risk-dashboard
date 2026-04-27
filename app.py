@@ -1275,17 +1275,19 @@ with tabs[2]:
                 if not o2_misc.empty:
                     miss_mask = exact.get("수주현황_고객").isna() if "수주현황_고객" in exact.columns else pd.Series([True] * len(exact))
                     if miss_mask.any():
-                        filled = exact[miss_mask].drop(columns=[c for c in o2_main.columns if c in exact.columns], errors="ignore")
-                        filled = filled.merge(
+                        left = exact.loc[miss_mask, ["제품명코드", "__고객납기_dt__"]].copy()
+                        left["__idx__"] = left.index
+                        filled = left.merge(
                             o2_misc,
                             left_on=["제품명코드", "__고객납기_dt__"],
                             right_on=["제품명코드", "__요청일_dt__"],
                             how="left",
-                        )
-                        # overwrite back
+                        ).set_index("__idx__")
+
+                        # overwrite back (key columns are preserved)
                         for c in ["__요청일_dt__", "수주현황_작지번호", "수주현황_고객", "수주현황_오더수량", "수주현황_수주금액(원)", "수주현황_출처"]:
                             if c in filled.columns:
-                                exact.loc[miss_mask, c] = filled[c].values
+                                exact.loc[miss_mask, c] = filled.reindex(exact.loc[miss_mask].index)[c].values
                         exact.loc[miss_mask & exact["수주현황_고객"].notna(), "수주현황_매칭"] = "exact(기타)"
 
                 if "변경 납기일(당일 종료예정일)" in exact.columns and "수주현황_출처" in exact.columns:
