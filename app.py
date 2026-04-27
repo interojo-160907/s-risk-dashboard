@@ -1325,7 +1325,10 @@ with tabs[2]:
                 view["요청납기일"] = pd.to_datetime(view["__요청일_dt__"], errors="coerce").dt.date
             if "고객납기일" in view.columns:
                 # 수주현황 매칭 실패(영업출고요청일 없음)인 경우 APS 고객납기일로 보완
-                view["요청납기일"] = pd.to_datetime(view.get("요청납기일"), errors="coerce").dt.date
+                if "요청납기일" in view.columns:
+                    view["요청납기일"] = pd.to_datetime(view["요청납기일"], errors="coerce").dt.date
+                else:
+                    view["요청납기일"] = pd.Series([pd.NaT] * len(view), index=view.index)
                 view["요청납기일"] = view["요청납기일"].fillna(pd.to_datetime(view["고객납기일"], errors="coerce").dt.date)
 
             # 표준 표시 컬럼(간소화)
