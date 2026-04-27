@@ -397,6 +397,9 @@ def load_orders_sgwan_for_join(
         sheet_name=order_sheet,
         cache_bust=cache_bust,
     )
+    if not orders_s.empty:
+        orders_s = orders_s.copy()
+        orders_s["__source_sheet__"] = "수주현황"
 
     misc_s = pd.DataFrame()
     if misc_sheet:
@@ -408,6 +411,9 @@ def load_orders_sgwan_for_join(
             cache_bust=cache_bust,
         )
         misc_s = _normalize_misc_orders_for_dashboard(misc_s)
+        if not misc_s.empty:
+            misc_s = misc_s.copy()
+            misc_s["__source_sheet__"] = "기타수주현황"
 
     out = pd.concat([orders_s, misc_s], ignore_index=True, sort=False) if not misc_s.empty else orders_s
     if out.empty:
@@ -429,12 +435,6 @@ def load_orders_sgwan_for_join(
     for col in ["영업출고요청일", "수주 전송일", "영업협의출고일", "포장완료일"]:
         if col in out.columns:
             out[col] = pd.to_datetime(out[col], errors="coerce").dt.date
-
-    # 요청 기준일(조인/관리 기준): 영업협의출고일 우선, 없으면 영업출고요청일
-    if "영업협의출고일" in out.columns or "영업출고요청일" in out.columns:
-        agreed = pd.to_datetime(out.get("영업협의출고일"), errors="coerce")
-        req = pd.to_datetime(out.get("영업출고요청일"), errors="coerce")
-        out["요청기준일"] = agreed.where(agreed.notna(), req).dt.date
 
     # 수량/금액 normalize
     for col in ["오더수량", "수주금액", "수주금액(원)", "수주금액(달러)"]:
@@ -1213,8 +1213,9 @@ with tabs[2]:
             o = orders_for_join.copy()
             o = o[o.get("제품명코드").notna()].copy() if "제품명코드" in o.columns else pd.DataFrame()
 
-            # (제품명코드, 요청기준일) 단위로 중복 집계
-            if not o.empty and "요청기준일" in o.columns:
+            # 1) 수주현황 시트(O열: 영업출고요청일)로 우선 매칭
+            # 2) 없으면 기타수주현황(E열: 납기일자 → normalize에서 영업출고요청일로 변환)로 재매칭
+            if not o.empty and "영업출고요청일" in o.columns and "__source_sheet__" in o.columns:
                 code_counts = o.groupby("제품명코드", dropna=False).size().to_dict() if "제품명코드" in o.columns else {}
                 agg = {
                     "작지번호": lambda s: ", ".join([x for x in pd.Series(s).dropna().astype(str).unique().tolist()][:5]),
@@ -1225,123 +1226,72 @@ with tabs[2]:
                 if "수주금액(원)" in o.columns:
                     agg["수주금액(원)"] = "sum"
 
-                o2 = (
-                    o.groupby(["제품명코드", "요청기준일"], dropna=False)
-                    .agg(agg)
-                    .reset_index()
-                    .rename(
-                        columns={
-                            "작지번호": "수주현황_작지번호",
-                            "고객": "수주현황_고객",
-                            "오더수량": "수주현황_오더수량",
-                            "수주금액(원)": "수주현황_수주금액(원)",
-                            "요청기준일": "수주현황_요청기준일",
-                        }
+                def _prep(source_name: str) -> pd.DataFrame:
+                    sub = o[o["__source_sheet__"] == source_name].copy()
+                    if sub.empty:
+                        return pd.DataFrame()
+                    sub["__요청일_dt__"] = pd.to_datetime(sub["영업출고요청일"], errors="coerce")
+                    sub = sub[sub["__요청일_dt__"].notna()].copy()
+                    if sub.empty:
+                        return pd.DataFrame()
+                    out2 = (
+                        sub.groupby(["제품명코드", "__요청일_dt__"], dropna=False)
+                        .agg(agg)
+                        .reset_index()
+                        .rename(
+                            columns={
+                                "작지번호": "수주현황_작지번호",
+                                "고객": "수주현황_고객",
+                                "오더수량": "수주현황_오더수량",
+                                "수주금액(원)": "수주현황_수주금액(원)",
+                            }
+                        )
                     )
-                )
+                    out2["수주현황_출처"] = source_name
+                    return out2
+
+                o2_main = _prep("수주현황")
+                o2_misc = _prep("기타수주현황")
 
                 a = action_df.copy()
                 if "고객납기일" in a.columns:
                     a["고객납기일"] = pd.to_datetime(a["고객납기일"], errors="coerce").dt.date
                 a["__고객납기_dt__"] = pd.to_datetime(a.get("고객납기일"), errors="coerce")
-                o2["__요청일_dt__"] = pd.to_datetime(o2["수주현황_요청기준일"], errors="coerce")
 
-                # 1) exact match (제품명코드 + 고객납기일=영업출고요청일)
-                exact = a.merge(
-                    o2,
-                    left_on=["제품명코드", "__고객납기_dt__"],
-                    right_on=["제품명코드", "__요청일_dt__"],
-                    how="left",
-                )
-                exact["수주현황_매칭"] = np.where(exact["수주현황_고객"].notna(), "exact", "")
+                exact = a.copy()
 
-                # 2) nearest fallback (제품명코드 기준, ±30일)
-                def _nearest_fill(ex: pd.DataFrame, candidates: pd.DataFrame, *, tol_days: int) -> None:
-                    if ex.empty:
-                        return
-                    if candidates.empty or "__요청일_dt__" not in candidates.columns:
-                        return
-                    cand_by: dict[str, pd.DataFrame] = {}
-                    for code, g in candidates.groupby("제품명코드", dropna=False):
-                        gs = g.sort_values("__요청일_dt__").reset_index(drop=True)
-                        cand_by[str(code)] = gs
+                if not o2_main.empty:
+                    exact = exact.merge(
+                        o2_main,
+                        left_on=["제품명코드", "__고객납기_dt__"],
+                        right_on=["제품명코드", "__요청일_dt__"],
+                        how="left",
+                    )
+                    exact["수주현황_매칭"] = np.where(exact["수주현황_고객"].notna(), "exact", "")
+                else:
+                    exact["수주현황_매칭"] = ""
 
-                    miss_mask = ex["수주현황_고객"].isna()
-                    if not miss_mask.any():
-                        return
+                # 수주현황에서 못 붙인 건들만 기타수주현황으로 재시도
+                if not o2_misc.empty:
+                    miss_mask = exact.get("수주현황_고객").isna() if "수주현황_고객" in exact.columns else pd.Series([True] * len(exact))
+                    if miss_mask.any():
+                        filled = exact[miss_mask].drop(columns=[c for c in o2_main.columns if c in exact.columns], errors="ignore")
+                        filled = filled.merge(
+                            o2_misc,
+                            left_on=["제품명코드", "__고객납기_dt__"],
+                            right_on=["제품명코드", "__요청일_dt__"],
+                            how="left",
+                        )
+                        # overwrite back
+                        for c in ["__요청일_dt__", "수주현황_작지번호", "수주현황_고객", "수주현황_오더수량", "수주현황_수주금액(원)", "수주현황_출처"]:
+                            if c in filled.columns:
+                                exact.loc[miss_mask, c] = filled[c].values
+                        exact.loc[miss_mask & exact["수주현황_고객"].notna(), "수주현황_매칭"] = "exact(기타)"
 
-                    def _one(i: int) -> None:
-                        r = ex.loc[i]
-                        code = str(r.get("제품명코드", ""))
-                        tgt = r.get("__고객납기_dt__")
-                        if not code or pd.isna(tgt) or code not in cand_by:
-                            return
-                        g = cand_by[code]
-                        dates = pd.to_datetime(g["__요청일_dt__"], errors="coerce")
-                        dates = dates.dropna().sort_values().to_numpy()
-                        if len(dates) == 0:
-                            return
-                        tgt_ts = pd.to_datetime(tgt, errors="coerce")
-                        if pd.isna(tgt_ts):
-                            return
-                        pos = int(np.searchsorted(dates, tgt_ts.to_datetime64()))
-                        cand = []
-                        if 0 <= pos < len(dates):
-                            cand.append(dates[pos])
-                        if 0 <= pos - 1 < len(dates):
-                            cand.append(dates[pos - 1])
-                        if not cand:
-                            return
-                        best = min(cand, key=lambda x: abs((x - tgt_ts).days))
-                        delta = int((best - tgt_ts).days)
-                        if abs(delta) > int(tol_days):
-                            return
-
-                        row = g[pd.to_datetime(g["__요청일_dt__"], errors="coerce") == best].head(1)
-                        if row.empty:
-                            return
-                        row0 = row.iloc[0]
-                        for col in ["영업출고요청일", "수주현황_작지번호", "수주현황_고객", "수주현황_오더수량", "수주현황_수주금액(원)"]:
-                            if col in ex.columns and col in row0.index:
-                                ex.at[i, col] = row0[col]
-                        ex.at[i, "수주현황_매칭"] = "nearest"
-
-                    for idx in ex.index[miss_mask].tolist():
-                        _one(idx)
-
-                _nearest_fill(exact, o2, tol_days=30)
-
-                # 3) 디버그: ±30일에 못 맞춘 건들에 대해, ±365일 기준 최근접 요청일/차이 저장
-                try:
-                    # tolerance 없이 '가장 가까운' 요청일을 계산(최대 ±365일)
-                    miss_any = exact["수주현황_고객"].isna()
-                    if miss_any.any() and not o2.empty:
-                        for i in exact.index[miss_any].tolist():
-                            code = str(exact.at[i, "제품명코드"]) if "제품명코드" in exact.columns else ""
-                            tgt = exact.at[i, "__고객납기_dt__"] if "__고객납기_dt__" in exact.columns else pd.NaT
-                            if not code or pd.isna(tgt):
-                                continue
-                            g = o2[o2["제품명코드"].astype(str) == code].copy()
-                            if g.empty:
-                                continue
-                            dates = pd.to_datetime(g["__요청일_dt__"], errors="coerce").dropna()
-                            if dates.empty:
-                                continue
-                            tgt_ts = pd.to_datetime(tgt, errors="coerce")
-                            if pd.isna(tgt_ts):
-                                continue
-                            best = dates.iloc[(dates - tgt_ts).abs().argsort()[:1]].iloc[0]
-                            delta = int((best - tgt_ts).days)
-                            if abs(delta) <= 365:
-                                exact.at[i, "수주현황_최근접요청일"] = best.date()
-                                exact.at[i, "수주현황_요청일차이(일)"] = delta
-                except Exception:
-                    pass
-
-                if "변경 납기일(당일 종료예정일)" in exact.columns and "영업출고요청일" in exact.columns:
+                if "변경 납기일(당일 종료예정일)" in exact.columns and "수주현황_출처" in exact.columns:
                     exact["초과일(변경-요청)"] = (
                         pd.to_datetime(exact["변경 납기일(당일 종료예정일)"], errors="coerce")
-                        - pd.to_datetime(exact.get("수주현황_요청기준일"), errors="coerce")
+                        - pd.to_datetime(exact["__요청일_dt__"], errors="coerce")
                     ).dt.days
 
                 drop_cols = [c for c in ["__고객납기_dt__", "__요청일_dt__"] if c in exact.columns]
@@ -1359,14 +1309,7 @@ with tabs[2]:
                         code_set = {str(k) for k in code_counts.keys()}
                         if str(code) not in code_set:
                             return "수주현황에 제품 없음(품명/마스터 매핑)"
-                    near_dt = r.get("수주현황_최근접요청일")
-                    delta = r.get("수주현황_요청일차이(일)")
-                    if pd.notna(near_dt) and pd.notna(delta):
-                        try:
-                            return f"요청일이 멀어요({int(delta):+d}일) / 최근접:{near_dt}"
-                        except Exception:
-                            pass
-                    return "요청일 매칭 실패(±30일 내 없음)"
+                    return "수주현황/기타수주현황에 요청일 매칭 없음"
 
                 action_df = action_df.copy()
                 action_df.loc[miss, "수주현황_미매칭사유"] = action_df[miss].apply(_reason, axis=1)
@@ -1376,8 +1319,8 @@ with tabs[2]:
         with t1:
             st.caption("업무 처리용(최신 기준일자, 총합계 이벤트)")
             view = action_df.copy()
-            if "수주현황_요청기준일" in view.columns:
-                view["요청납기일"] = pd.to_datetime(view["수주현황_요청기준일"], errors="coerce").dt.date
+            if "__요청일_dt__" in view.columns:
+                view["요청납기일"] = pd.to_datetime(view["__요청일_dt__"], errors="coerce").dt.date
             if "고객납기일" in view.columns:
                 # 수주현황 매칭 실패(영업출고요청일 없음)인 경우 APS 고객납기일로 보완
                 view["요청납기일"] = pd.to_datetime(view.get("요청납기일"), errors="coerce").dt.date
@@ -1391,9 +1334,8 @@ with tabs[2]:
                 "제품명코드",
                 "제품명_마스터",
                 "수주현황_고객",
+                "수주현황_출처",
                 "수주현황_미매칭사유",
-                "수주현황_최근접요청일",
-                "수주현황_요청일차이(일)",
                 "요청납기일",
                 "변경 납기일(당일 종료예정일)",
                 "기존 납기일(전일 종료예정일)",
