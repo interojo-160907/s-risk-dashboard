@@ -120,7 +120,7 @@ def _build_long_for_sheet(
     if 기준일자 is None:
         raise ValueError(f"날짜 시트명이 아닙니다: {sheet_name!r}")
 
-    wide = pd.read_excel(xlsx_path, sheet_name=sheet_name, header=[0, 1])
+    wide = pd.read_excel(xlsx_path, sheet_name=sheet_name, header=[0, 1])  # type: ignore[call-arg]
     if wide.empty:
         return pd.DataFrame()
 

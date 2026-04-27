@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from risk_dashboard.aps_cache import default_cache_paths as aps_default_cache_paths
+from risk_dashboard.aps_cache import load_cached_tables as aps_load_cached_tables
+from risk_dashboard.aps_cache import save_cached_tables as aps_save_cached_tables
+from risk_dashboard.aps_cache import signature as aps_signature
 from risk_dashboard.aps_variation import analyze_workbook as analyze_aps_workbook
 from risk_dashboard.io import default_data_paths, load_production_actuals
 from risk_dashboard.logging_utils import get_logger
@@ -1030,27 +1034,57 @@ with tabs[2]:
         scope = st.radio("스코프(공정)", ["기본(총합계+[85]포장)", "전체"], index=0, horizontal=True)
         if scope.startswith("기본"):
             scope_processes = ("총합계", "[85]포장")
+            scope_key = "default"
         else:
             xl = pd.ExcelFile(aps_path)
             date_sheets = [s for s in xl.sheet_names if s != "제품명등록" and str(s).isdigit()]
             if not date_sheets:
                 st.error("날짜 시트를 찾지 못했습니다(예: 260427 또는 20260427).")
                 scope_processes = ("총합계", "[85]포장")
+                scope_key = "default"
             else:
                 sample = pd.read_excel(aps_path, sheet_name=date_sheets[-1], header=[0, 1], nrows=1)
                 procs = [c[0] for c in sample.columns if c[0] != "공정 코드:"]
                 scope_processes = tuple(dict.fromkeys(procs).keys())
+                scope_key = "all"
 
-        if st.button("APS 리스크 분석 새로고침"):
-            st.cache_data.clear()
-            st.rerun()
+        cache_paths = aps_default_cache_paths("data")
+        sig = aps_signature(aps_path)
 
-        with st.spinner("APS 리스크 분석 중..."):
-            tables = load_aps_risk_tables(
-                str(aps_path),
-                scope_processes=scope_processes,
-                cache_bust=aps_path.stat().st_mtime,
-            )
+        tables = aps_load_cached_tables(cache_paths, sig=sig, scope_key=scope_key)
+        if tables is None:
+            st.info("아직 분석 캐시가 없습니다. 아래 버튼을 눌러 1회 분석을 실행하세요(이후엔 즉시 로드됩니다).")
+            run = st.button("APS 리스크 분석 실행(캐시 생성)")
+            if run:
+                with st.spinner("APS 리스크 분석 중..."):
+                    tables = load_aps_risk_tables(
+                        str(aps_path),
+                        scope_processes=scope_processes,
+                        cache_bust=sig.mtime,
+                    )
+                try:
+                    aps_save_cached_tables(cache_paths, sig=sig, scope_key=scope_key, tables=tables)
+                except Exception as e:
+                    st.warning(f"캐시 저장 실패(표시는 정상): {e}")
+        else:
+            col_a, col_b = st.columns([1, 1])
+            with col_a:
+                if st.button("재분석(캐시 갱신)"):
+                    with st.spinner("APS 리스크 재분석 중..."):
+                        tables = load_aps_risk_tables(
+                            str(aps_path),
+                            scope_processes=scope_processes,
+                            cache_bust=sig.mtime,
+                        )
+                    try:
+                        aps_save_cached_tables(cache_paths, sig=sig, scope_key=scope_key, tables=tables)
+                    except Exception as e:
+                        st.warning(f"캐시 저장 실패(표시는 정상): {e}")
+            with col_b:
+                st.caption(f"캐시 파일: {cache_paths.data_pkl}")
+
+        if not tables:
+            st.stop()
 
         action_df = tables.get("액션리스트", pd.DataFrame())
         risk_df = tables.get("리스크요약", pd.DataFrame())
@@ -1194,12 +1228,14 @@ with tabs[2]:
             st.dataframe(pack_df, use_container_width=True, hide_index=True)
 
         out_buf = io.BytesIO()
-        with pd.ExcelWriter(out_buf, engine="openpyxl") as w:
-            for name, df in tables.items():
-                df.to_excel(w, sheet_name=name, index=False)
-        st.download_button(
-            "결과 엑셀 다운로드",
-            data=out_buf.getvalue(),
-            file_name="aps_risk_result.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        with st.expander("결과 다운로드", expanded=False):
+            if st.button("다운로드 파일 생성"):
+                with pd.ExcelWriter(out_buf, engine="openpyxl") as w:
+                    for name, df in tables.items():
+                        df.to_excel(w, sheet_name=name, index=False)
+                st.download_button(
+                    "결과 엑셀 다운로드",
+                    data=out_buf.getvalue(),
+                    file_name="aps_risk_result.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
