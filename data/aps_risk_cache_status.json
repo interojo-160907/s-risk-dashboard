@@ -1,6 +1,6 @@
 {
   "state": "done",
-  "finished_at": "2026-04-27 14:00:23",
+  "finished_at": "2026-04-27 15:19:25",
   "input": "C:\\Users\\심민식\\Documents\\GitHub\\S관 납기 리스크 관리 대시보드\\업데이트 데이터\\APS 변동사항 체크.xlsx",
   "scope": "default",
   "cache_pkl": "data\\aps_risk_cache.pkl",

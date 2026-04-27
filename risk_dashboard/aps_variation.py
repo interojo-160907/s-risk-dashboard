@@ -18,15 +18,19 @@ class APSVariationCols:
     수주번호: str = "수주번호"
     수요제품코드: str = "수요제품코드"
     제품이름: str = "제품 이름"
-    납기일: str = "납기일"
+    납기일: str = "납기일"  # 고객납기(요청)
+    제품그룹코드: str = "제품 그룹 코드"
+    이니셜: str = "이니셜"
 
     제품명코드: str = "제품명코드"
     공정코드: str = "공정코드"
     종료예정일: str = "종료예정일"
     필요수량: str = "필요수량"
 
+    제품구분: str = "제품구분"
     제품명_마스터: str = "제품명_마스터"
     거래처명: str = "거래처명"
+    공장구분: str = "공장구분"
 
     전일_종료예정일: str = "전일 종료예정일"
     전일_필요수량: str = "전일 필요수량"
@@ -82,6 +86,16 @@ def _read_master_products(xlsx_path: str | Path) -> pd.DataFrame:
     master["제품명코드"] = master["제품명코드"].astype(str).str.strip()
     master = master[master["제품명코드"].ne("")].copy()
     out = master[["제품명코드"]].copy()
+    if "공장구분" in master.columns:
+        out[COLS.공장구분] = master["공장구분"].astype(str).str.strip()
+    # 제품구분(표시용): 생산제품군 > 판매제품군 > 구분
+    prod_group_col = "생산제품군" if "생산제품군" in master.columns else None
+    if prod_group_col is None and "판매제품군" in master.columns:
+        prod_group_col = "판매제품군"
+    if prod_group_col is None and "구분" in master.columns:
+        prod_group_col = "구분"
+    if prod_group_col:
+        out[COLS.제품구분] = master[prod_group_col]
     if "제품명" in master.columns:
         out[COLS.제품명_마스터] = master["제품명"]
     if "거래처명" in master.columns:
@@ -154,6 +168,8 @@ def _build_long_for_ws(
         (META_GROUP, "수요 제품 코드"): COLS.수요제품코드,
         (META_GROUP, "제품 이름"): COLS.제품이름,
         (META_GROUP, "납기일"): COLS.납기일,
+        (META_GROUP, "제품 그룹 코드"): COLS.제품그룹코드,
+        (META_GROUP, "이니셜"): COLS.이니셜,
     }
     missing_meta = [k for k in meta_keys if k not in idx_map]
     if missing_meta:
@@ -178,6 +194,8 @@ def _build_long_for_ws(
         demand_code = row[meta_idxs[COLS.수요제품코드]]
         prod_name = row[meta_idxs[COLS.제품이름]]
         due = row[meta_idxs[COLS.납기일]]
+        grp = row[meta_idxs[COLS.제품그룹코드]]
+        ini = row[meta_idxs[COLS.이니셜]]
 
         for proc_name, (qty_i, end_i) in proc_cols.items():
             if qty_i is None and end_i is None:
@@ -194,6 +212,8 @@ def _build_long_for_ws(
                     COLS.수요제품코드: None if demand_code is None else str(demand_code).strip(),
                     COLS.제품이름: None if prod_name is None else str(prod_name).strip(),
                     COLS.납기일: due,
+                    COLS.제품그룹코드: None if grp is None else str(grp).strip(),
+                    COLS.이니셜: None if ini is None else str(ini).strip(),
                     COLS.공정코드: proc_name,
                     COLS.필요수량: qty,
                     COLS.종료예정일: end,
@@ -217,7 +237,14 @@ def build_aps_long_table(
     window_days: int | None = 8,
 ) -> pd.DataFrame:
     master = _read_master_products(xlsx_path)
-    managed_codes = set(master["제품명코드"].astype(str).str.strip().tolist())
+    # S관만 관리(마스터에 공장구분이 있으면 S관만)
+    master2 = master.copy()
+    if COLS.공장구분 in master2.columns:
+        master2["_plant_norm"] = master2[COLS.공장구분].astype(str).str.strip()
+        master2 = master2[master2["_plant_norm"].str.contains("S관", na=False)].copy()
+        master2 = master2.drop(columns=["_plant_norm"], errors="ignore")
+
+    managed_codes = set(master2["제품명코드"].astype(str).str.strip().tolist())
 
     # 날짜 시트 파싱 + 성능 최적화: 워크북은 1회만 open
     try:
@@ -253,7 +280,7 @@ def build_aps_long_table(
     out[COLS.제품명코드] = out[COLS.수요제품코드].map(derive_제품명코드)
     out = out[out[COLS.제품명코드].isin(managed_codes)].copy()
 
-    out = out.merge(master, on=COLS.제품명코드, how="left")
+    out = out.merge(master2, on=COLS.제품명코드, how="left")
     return out
 
 
@@ -335,23 +362,44 @@ def build_risk_summary(df: pd.DataFrame, *, days: int = 7) -> pd.DataFrame:
             return ""
         return s.mode().iloc[0]
 
-    gkey = [COLS.수주번호, COLS.수요제품코드, COLS.제품명코드]
-    agg = win.groupby(gkey, dropna=False).agg(
-        변동_횟수=(COLS.이벤트, lambda x: int(pd.Series(x).fillna(False).sum())),
-        최대_지연일수=(
-            COLS.종료예정일,
-            lambda x: (
-                (pd.to_datetime(pd.Series(x), errors="coerce").max() - pd.to_datetime(pd.Series(x), errors="coerce").min())
-                .days
-                if pd.to_datetime(pd.Series(x), errors="coerce").notna().any()
-                else np.nan
-            ),
-        ),
-        대표_원인=(COLS.원인, _mode),
-        제품명_마스터=(COLS.제품명_마스터, _mode),
-        거래처명=(COLS.거래처명, _mode),
+    # 수주번호+제품명코드 단위(해당 제품군 내 SKU 중 가장 늦는 종료예정일이 실 납기라고 가정)
+    per_day = (
+        win.groupby([COLS.기준일자, COLS.수주번호, COLS.제품명코드], dropna=False)
+        .agg(
+            종료예정일_max=(COLS.종료예정일, lambda x: pd.to_datetime(pd.Series(x), errors="coerce").max()),
+            이벤트_any=(COLS.이벤트, lambda x: bool(pd.Series(x).fillna(False).any())),
+            대표_원인=(COLS.원인, _mode),
+            고객납기일=(COLS.납기일, lambda x: pd.to_datetime(pd.Series(x), errors="coerce").dt.date.mode().iloc[0] if pd.to_datetime(pd.Series(x), errors="coerce").notna().any() else None),
+            제품구분=(COLS.제품구분, _mode),
+            이니셜=(COLS.이니셜, _mode),
+            **{COLS.제품그룹코드: (COLS.제품그룹코드, _mode)},
+            제품명_마스터=(COLS.제품명_마스터, _mode),
+            거래처명=(COLS.거래처명, _mode),
+        )
+        .reset_index()
     )
-    agg = agg.reset_index()
+
+    def _max_delay_days(series: pd.Series) -> float:
+        s = pd.to_datetime(series, errors="coerce")
+        if s.notna().any():
+            return float((s.max() - s.min()).days)
+        return float("nan")
+
+    agg = (
+        per_day.groupby([COLS.수주번호, COLS.제품명코드], dropna=False)
+        .agg(
+            변동_횟수=("이벤트_any", lambda x: int(pd.Series(x).fillna(False).sum())),
+            최대_지연일수=("종료예정일_max", _max_delay_days),
+            대표_원인=("대표_원인", _mode),
+            고객납기일=("고객납기일", _mode),
+            제품구분=("제품구분", _mode),
+            이니셜=("이니셜", _mode),
+            **{COLS.제품그룹코드: (COLS.제품그룹코드, _mode)},
+            제품명_마스터=("제품명_마스터", _mode),
+            거래처명=("거래처명", _mode),
+        )
+        .reset_index()
+    )
     agg["윈도우_시작"] = start_day
     agg["윈도우_종료"] = max_day
     return agg.sort_values(["변동_횟수", "최대_지연일수"], ascending=[False, False])
@@ -369,10 +417,46 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
     if base.empty:
         return base
 
-    base["기존 납기일(전일 종료예정일)"] = base[COLS.전일_종료예정일]
-    base["변경 납기일(당일 종료예정일)"] = base[COLS.종료예정일]
-    base["초과일(변경-고객)"] = (
-        pd.to_datetime(base[COLS.종료예정일], errors="coerce") - pd.to_datetime(base[COLS.납기일], errors="coerce")
+    def _mode(series: pd.Series) -> str:
+        s = series.dropna().astype(str)
+        s = s[s.ne("")]
+        if s.empty:
+            return ""
+        return s.mode().iloc[0]
+
+    def _pick_cause(series: pd.Series) -> str:
+        priority = ["수주 증가", "포장 영향", "생산 부족", "APS 재계산"]
+        vals = [v for v in series.dropna().astype(str).tolist() if v]
+        for p in priority:
+            if p in vals:
+                return p
+        return _mode(series)
+
+    grouped = (
+        base.groupby([COLS.수주번호, COLS.제품명코드], dropna=False)
+        .agg(
+            제품구분=(COLS.제품구분, _mode),
+            이니셜=(COLS.이니셜, _mode),
+            **{COLS.제품그룹코드: (COLS.제품그룹코드, _mode)},
+            고객납기일=(COLS.납기일, lambda x: pd.to_datetime(pd.Series(x), errors="coerce").dt.date.mode().iloc[0] if pd.to_datetime(pd.Series(x), errors="coerce").notna().any() else None),
+            기존_종료예정일=(COLS.전일_종료예정일, lambda x: pd.to_datetime(pd.Series(x), errors="coerce").max().date() if pd.to_datetime(pd.Series(x), errors="coerce").notna().any() else None),
+            변경_종료예정일=(COLS.종료예정일, lambda x: pd.to_datetime(pd.Series(x), errors="coerce").max().date() if pd.to_datetime(pd.Series(x), errors="coerce").notna().any() else None),
+            수량변동=(COLS.수량변동, lambda x: float(pd.to_numeric(pd.Series(x), errors="coerce").fillna(0).sum())),
+            원인=(COLS.원인, _pick_cause),
+            제품명_마스터=(COLS.제품명_마스터, _mode),
+            거래처명=(COLS.거래처명, _mode),
+            SKU수=(COLS.수요제품코드, lambda x: int(pd.Series(x).dropna().astype(str).nunique())),
+        )
+        .reset_index()
+    )
+
+    grouped["기존 납기일(전일 종료예정일)"] = grouped["기존_종료예정일"]
+    grouped["변경 납기일(당일 종료예정일)"] = grouped["변경_종료예정일"]
+    grouped[COLS.변동일수] = (
+        pd.to_datetime(grouped["변경_종료예정일"], errors="coerce") - pd.to_datetime(grouped["기존_종료예정일"], errors="coerce")
+    ).dt.days
+    grouped["초과일(변경-고객)"] = (
+        pd.to_datetime(grouped["변경_종료예정일"], errors="coerce") - pd.to_datetime(grouped["고객납기일"], errors="coerce")
     ).dt.days
 
     action_map = {
@@ -382,29 +466,32 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
         "APS 재계산": "내부 검토",
         "": "",
     }
-    base[COLS.조치유형] = base[COLS.원인].map(action_map).fillna("")
-    base["협의상태"] = ""
-    base["비고"] = ""
+    grouped[COLS.조치유형] = grouped[COLS.원인].map(action_map).fillna("")
+    grouped["협의상태"] = ""
+    grouped["비고"] = ""
 
     cols = [
+        COLS.제품구분,
+        COLS.이니셜,
+        COLS.제품그룹코드,
         COLS.수주번호,
-        COLS.수요제품코드,
         COLS.제품명코드,
-        COLS.납기일,
+        "고객납기일",
         "기존 납기일(전일 종료예정일)",
         "변경 납기일(당일 종료예정일)",
         COLS.변동일수,
-        COLS.수량변동,
-        COLS.원인,
         "초과일(변경-고객)",
+        COLS.원인,
         COLS.조치유형,
+        "SKU수",
+        COLS.수량변동,
         "협의상태",
         "비고",
         COLS.제품명_마스터,
         COLS.거래처명,
     ]
-    cols = [c for c in cols if c in base.columns]
-    return base[cols].sort_values([COLS.변동일수, "초과일(변경-고객)"], ascending=[False, False])
+    cols = [c for c in cols if c in grouped.columns]
+    return grouped[cols].sort_values([COLS.변동일수, "초과일(변경-고객)"], ascending=[False, False])
 
 
 def analyze_workbook(

@@ -9,6 +9,9 @@ from typing import Any
 import pandas as pd
 
 
+APS_RISK_CACHE_VERSION = 4
+
+
 @dataclass(frozen=True)
 class FileSignature:
     path: str
@@ -45,6 +48,8 @@ def load_cached_tables(paths: ApsCachePaths, *, sig: FileSignature, scope_key: s
         return None
 
     if (
+        int(meta.get("version", -1)) != APS_RISK_CACHE_VERSION
+        or
         meta.get("input_path") != sig.path
         or float(meta.get("input_mtime", -1)) != sig.mtime
         or int(meta.get("input_size", -1)) != sig.size
@@ -92,6 +97,7 @@ def save_cached_tables(
     paths.data_pkl.parent.mkdir(parents=True, exist_ok=True)
     pd.to_pickle(tables, paths.data_pkl)
     meta = {
+        "version": APS_RISK_CACHE_VERSION,
         "input_path": sig.path,
         "input_mtime": sig.mtime,
         "input_size": sig.size,

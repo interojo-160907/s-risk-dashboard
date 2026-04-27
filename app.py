@@ -1233,14 +1233,15 @@ with tabs[2]:
                 )
 
                 a = action_df.copy()
-                a["납기일"] = pd.to_datetime(a["납기일"], errors="coerce").dt.date if "납기일" in a.columns else pd.NaT
-                a["__납기일_dt__"] = pd.to_datetime(a["납기일"], errors="coerce")
+                if "고객납기일" in a.columns:
+                    a["고객납기일"] = pd.to_datetime(a["고객납기일"], errors="coerce").dt.date
+                a["__고객납기_dt__"] = pd.to_datetime(a.get("고객납기일"), errors="coerce")
                 o2["__요청일_dt__"] = pd.to_datetime(o2["영업출고요청일"], errors="coerce")
 
-                # 1) exact match (제품명코드 + 납기일=영업출고요청일)
+                # 1) exact match (제품명코드 + 고객납기일=영업출고요청일)
                 exact = a.merge(
                     o2,
-                    left_on=["제품명코드", "__납기일_dt__"],
+                    left_on=["제품명코드", "__고객납기_dt__"],
                     right_on=["제품명코드", "__요청일_dt__"],
                     how="left",
                 )
@@ -1248,12 +1249,12 @@ with tabs[2]:
 
                 # 2) nearest fallback (제품명코드 기준, ±30일)
                 try:
-                    a_sorted = a.sort_values(["제품명코드", "__납기일_dt__"]).copy()
+                    a_sorted = a.sort_values(["제품명코드", "__고객납기_dt__"]).copy()
                     o_sorted = o2.sort_values(["제품명코드", "__요청일_dt__"]).copy()
                     near = pd.merge_asof(
                         a_sorted,
                         o_sorted,
-                        left_on="__납기일_dt__",
+                        left_on="__고객납기_dt__",
                         right_on="__요청일_dt__",
                         by="제품명코드",
                         direction="nearest",
@@ -1269,19 +1270,47 @@ with tabs[2]:
                 except Exception:
                     pass
 
-                if "영업출고요청일" in exact.columns and "납기일" in exact.columns:
-                    exact["요청-고객납기(일)"] = (
-                        pd.to_datetime(exact["영업출고요청일"], errors="coerce")
-                        - pd.to_datetime(exact["납기일"], errors="coerce")
+                if "변경 납기일(당일 종료예정일)" in exact.columns and "영업출고요청일" in exact.columns:
+                    exact["초과일(변경-요청)"] = (
+                        pd.to_datetime(exact["변경 납기일(당일 종료예정일)"], errors="coerce")
+                        - pd.to_datetime(exact["영업출고요청일"], errors="coerce")
                     ).dt.days
 
-                drop_cols = [c for c in ["__납기일_dt__", "__요청일_dt__"] if c in exact.columns]
+                drop_cols = [c for c in ["__고객납기_dt__", "__요청일_dt__"] if c in exact.columns]
                 action_df = exact.drop(columns=drop_cols, errors="ignore")
 
         t1, t2, t3, t4 = st.tabs(["액션리스트", "리스크요약(7일)", "변동분석_총합계", "변동분석_포장"])
         with t1:
             st.caption("업무 처리용(최신 기준일자, 총합계 이벤트)")
-            st.dataframe(action_df, use_container_width=True, hide_index=True)
+            view = action_df.copy()
+            if "영업출고요청일" in view.columns:
+                view["요청납기일"] = pd.to_datetime(view["영업출고요청일"], errors="coerce").dt.date
+            if "요청납기일" not in view.columns or view["요청납기일"].isna().all():
+                if "고객납기일" in view.columns:
+                    view["요청납기일"] = pd.to_datetime(view["고객납기일"], errors="coerce").dt.date
+
+            # 표준 표시 컬럼(간소화)
+            show_cols = [
+                "제품구분",
+                "이니셜",
+                "수주번호",
+                "제품명코드",
+                "제품명_마스터",
+                "수주현황_고객",
+                "요청납기일",
+                "변경 납기일(당일 종료예정일)",
+                "기존 납기일(전일 종료예정일)",
+                "변동일수",
+                "초과일(변경-요청)",
+                "원인",
+                "조치유형",
+                "SKU수",
+                "수주현황_작지번호",
+                "협의상태",
+                "비고",
+            ]
+            show_cols = [c for c in show_cols if c in view.columns]
+            st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
         with t2:
             st.caption("불안정 수주 요약(최근 7일, 총합계 기준)")
             st.dataframe(risk_df, use_container_width=True, hide_index=True)
