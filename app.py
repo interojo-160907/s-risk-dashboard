@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -351,6 +352,63 @@ def load_aps_risk_tables(
 ) -> dict[str, pd.DataFrame]:
     _ = cache_bust
     return analyze_aps_workbook(aps_xlsx, scope_processes=scope_processes)
+
+
+@st.cache_data(show_spinner=False)
+def load_orders_sgwan_for_join(
+    order_book_xlsx: str,
+    master_xlsx: str,
+    *,
+    order_sheet: str,
+    misc_sheet: str | None,
+    cache_bust: float | None = None,
+) -> pd.DataFrame:
+    _ = cache_bust
+    orders_s = load_order_status_sgwan(
+        order_book_xlsx,
+        master_xlsx,
+        sheet_name=order_sheet,
+        cache_bust=cache_bust,
+    )
+
+    misc_s = pd.DataFrame()
+    if misc_sheet:
+        misc_s = load_order_status_sgwan(
+            order_book_xlsx,
+            master_xlsx,
+            sheet_name=misc_sheet,
+            header_row_1based=1,
+            cache_bust=cache_bust,
+        )
+        misc_s = _normalize_misc_orders_for_dashboard(misc_s)
+
+    out = pd.concat([orders_s, misc_s], ignore_index=True, sort=False) if not misc_s.empty else orders_s
+    if out.empty:
+        return out
+
+    # 제품명코드 매핑(품명 -> 제품명코드)
+    mdf = load_master_table(Path(master_xlsx))
+    mdf_s = filter_sgwan(mdf)
+    if "제품명" in mdf_s.columns and "제품명코드" in mdf_s.columns and "품명" in out.columns:
+        name_to_code = dict(
+            zip(
+                mdf_s["제품명"].astype(str).str.strip().tolist(),
+                mdf_s["제품명코드"].astype(str).str.strip().tolist(),
+            )
+        )
+        out["제품명코드"] = out["품명"].astype(str).str.strip().map(name_to_code)
+
+    # 날짜 컬럼 normalize
+    for col in ["영업출고요청일", "수주 전송일", "영업협의출고일", "포장완료일"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce").dt.date
+
+    # 수량/금액 normalize
+    for col in ["오더수량", "수주금액", "수주금액(원)", "수주금액(달러)"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+
+    return out
 
 
 with st.sidebar:
@@ -998,6 +1056,130 @@ with tabs[2]:
         risk_df = tables.get("리스크요약", pd.DataFrame())
         total_df = tables.get("변동분석_총합계", pd.DataFrame())
         pack_df = tables.get("변동분석_포장", pd.DataFrame())
+
+        # 최신 기준일자(=금일 관리 기준)
+        try:
+            latest_asof = pd.to_datetime(total_df.get("기준일자"), errors="coerce").dt.date.max() if not total_df.empty else None
+        except Exception:
+            latest_asof = None
+        if latest_asof:
+            st.caption(f"APS 최신 기준일자(관리 기준): {latest_asof}")
+
+        # 7일 트렌드/금일 액션 요약
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.metric("금일 액션 건수", f"{len(action_df):,}" if not action_df.empty else "0")
+        with k2:
+            if not risk_df.empty and "변동_횟수" in risk_df.columns:
+                risky = int((pd.to_numeric(risk_df["변동_횟수"], errors="coerce").fillna(0) > 0).sum())
+                st.metric("7일 변동 수주", f"{risky:,}")
+            else:
+                st.metric("7일 변동 수주", "-")
+        with k3:
+            if not risk_df.empty and "최대_지연일수" in risk_df.columns:
+                mx = pd.to_numeric(risk_df["최대_지연일수"], errors="coerce").max()
+                st.metric("7일 최대 지연(일)", f"{int(mx):,}" if pd.notna(mx) else "-")
+            else:
+                st.metric("7일 최대 지연(일)", "-")
+
+        if not risk_df.empty and "윈도우_시작" in risk_df.columns and "윈도우_종료" in risk_df.columns:
+            try:
+                w_start = pd.to_datetime(risk_df["윈도우_시작"], errors="coerce").dt.date.min()
+                w_end = pd.to_datetime(risk_df["윈도우_종료"], errors="coerce").dt.date.max()
+                if w_start and w_end:
+                    st.caption(f"7일 트렌드 윈도우: {w_start} ~ {w_end}")
+            except Exception:
+                pass
+
+        # 수주현황(영업출고요청일/고객/작지번호) 붙이기
+        orders_for_join = pd.DataFrame()
+        try:
+            if order_sheet and Path(order_book_xlsx).exists() and Path(master_xlsx).exists():
+                order_mtime = Path(order_book_xlsx).stat().st_mtime
+                orders_for_join = load_orders_sgwan_for_join(
+                    order_book_xlsx,
+                    master_xlsx,
+                    order_sheet=order_sheet,
+                    misc_sheet=misc_sheet,
+                    cache_bust=order_mtime,
+                )
+        except Exception:
+            orders_for_join = pd.DataFrame()
+
+        if not action_df.empty and not orders_for_join.empty and "제품명코드" in action_df.columns:
+            o = orders_for_join.copy()
+            o = o[o.get("제품명코드").notna()].copy() if "제품명코드" in o.columns else pd.DataFrame()
+
+            # (제품명코드, 영업출고요청일) 단위로 중복 집계
+            if not o.empty and "영업출고요청일" in o.columns:
+                agg = {
+                    "작지번호": lambda s: ", ".join([x for x in pd.Series(s).dropna().astype(str).unique().tolist()][:5]),
+                    "고객": lambda s: ", ".join([x for x in pd.Series(s).dropna().astype(str).unique().tolist()][:3]),
+                }
+                if "오더수량" in o.columns:
+                    agg["오더수량"] = "sum"
+                if "수주금액(원)" in o.columns:
+                    agg["수주금액(원)"] = "sum"
+
+                o2 = (
+                    o.groupby(["제품명코드", "영업출고요청일"], dropna=False)
+                    .agg(agg)
+                    .reset_index()
+                    .rename(
+                        columns={
+                            "작지번호": "수주현황_작지번호",
+                            "고객": "수주현황_고객",
+                            "오더수량": "수주현황_오더수량",
+                            "수주금액(원)": "수주현황_수주금액(원)",
+                        }
+                    )
+                )
+
+                a = action_df.copy()
+                a["납기일"] = pd.to_datetime(a["납기일"], errors="coerce").dt.date if "납기일" in a.columns else pd.NaT
+                a["__납기일_dt__"] = pd.to_datetime(a["납기일"], errors="coerce")
+                o2["__요청일_dt__"] = pd.to_datetime(o2["영업출고요청일"], errors="coerce")
+
+                # 1) exact match (제품명코드 + 납기일=영업출고요청일)
+                exact = a.merge(
+                    o2,
+                    left_on=["제품명코드", "__납기일_dt__"],
+                    right_on=["제품명코드", "__요청일_dt__"],
+                    how="left",
+                )
+                exact["수주현황_매칭"] = np.where(exact["수주현황_고객"].notna(), "exact", "")
+
+                # 2) nearest fallback (제품명코드 기준, ±30일)
+                try:
+                    a_sorted = a.sort_values(["제품명코드", "__납기일_dt__"]).copy()
+                    o_sorted = o2.sort_values(["제품명코드", "__요청일_dt__"]).copy()
+                    near = pd.merge_asof(
+                        a_sorted,
+                        o_sorted,
+                        left_on="__납기일_dt__",
+                        right_on="__요청일_dt__",
+                        by="제품명코드",
+                        direction="nearest",
+                        tolerance=pd.Timedelta(days=30),
+                    )
+                    near = near.set_index(a_sorted.index)
+                    # fill only when exact missing
+                    miss = exact["수주현황_고객"].isna()
+                    for c in ["영업출고요청일", "수주현황_작지번호", "수주현황_고객", "수주현황_오더수량", "수주현황_수주금액(원)"]:
+                        if c in exact.columns and c in near.columns:
+                            exact.loc[miss, c] = near.loc[miss, c]
+                    exact.loc[miss & exact["수주현황_고객"].notna(), "수주현황_매칭"] = "nearest"
+                except Exception:
+                    pass
+
+                if "영업출고요청일" in exact.columns and "납기일" in exact.columns:
+                    exact["요청-고객납기(일)"] = (
+                        pd.to_datetime(exact["영업출고요청일"], errors="coerce")
+                        - pd.to_datetime(exact["납기일"], errors="coerce")
+                    ).dt.days
+
+                drop_cols = [c for c in ["__납기일_dt__", "__요청일_dt__"] if c in exact.columns]
+                action_df = exact.drop(columns=drop_cols, errors="ignore")
 
         t1, t2, t3, t4 = st.tabs(["액션리스트", "리스크요약(7일)", "변동분석_총합계", "변동분석_포장"])
         with t1:
