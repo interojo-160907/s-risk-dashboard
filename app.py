@@ -13,10 +13,29 @@ import pandas as pd
 import streamlit as st
 
 from risk_dashboard.aps_cache import default_cache_paths as aps_default_cache_paths
-from risk_dashboard.aps_cache import load_any_tables as aps_load_any_tables
 from risk_dashboard.aps_cache import load_cached_tables as aps_load_cached_tables
 from risk_dashboard.aps_cache import save_cached_tables as aps_save_cached_tables
 from risk_dashboard.aps_cache import signature as aps_signature
+
+# Backward-compatible import (in case app.py is deployed before aps_cache.py update)
+try:
+    from risk_dashboard.aps_cache import load_any_tables as aps_load_any_tables
+except Exception:  # pragma: no cover
+    def aps_load_any_tables(paths: object) -> dict[str, pd.DataFrame] | None:
+        try:
+            pkl = getattr(paths, "data_pkl", None)
+            if pkl is None or (hasattr(pkl, "exists") and not pkl.exists()):
+                return None
+            obj = pd.read_pickle(pkl)
+            if not isinstance(obj, dict):
+                return None
+            out: dict[str, pd.DataFrame] = {}
+            for k, v in obj.items():
+                if isinstance(v, pd.DataFrame):
+                    out[str(k)] = v
+            return out or None
+        except Exception:
+            return None
 from risk_dashboard.aps_variation import analyze_workbook as analyze_aps_workbook
 from risk_dashboard.io import default_data_paths, load_production_actuals
 from risk_dashboard.logging_utils import get_logger
