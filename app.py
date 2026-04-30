@@ -66,7 +66,7 @@ def _df_to_xlsx_bytes(df: pd.DataFrame, *, sheet_name: str) -> bytes:
 
 def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None) -> bytes:
     import openpyxl  # type: ignore[import-not-found]
-    from openpyxl.styles import Alignment, Border, Font, Side
+    from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
 
     def _is_number(x: object) -> bool:
@@ -95,8 +95,6 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
         header_row = top_row + 1
         data_row0 = top_row + 2
 
-        thin = Side(style="thin", color="000000")
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
         title_font = Font(bold=True, size=12)
         header_font = Font(bold=True)
 
@@ -116,7 +114,6 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
             c = ws.cell(row=header_row, column=left_col + j, value=str(col_name))
             c.font = header_font
             c.alignment = Alignment(horizontal="center", vertical="center")
-            c.border = border
 
         # Data
         shade_idx = cols.index(shade_col_name) if shade_col_name in cols else None
@@ -137,8 +134,6 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
                 else:
                     cell.value = "" if v is None else str(v)
                     cell.alignment = Alignment(horizontal="left", vertical="center")
-
-                cell.border = border
                 _ = shade_idx  # 색상 미사용(요청에 따라 셀 색상 제거)
 
         # Column widths (simple heuristic)
