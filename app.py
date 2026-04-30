@@ -63,6 +63,142 @@ def _df_to_xlsx_bytes(df: pd.DataFrame, *, sheet_name: str) -> bytes:
         df.to_excel(writer, sheet_name=sheet_name, index=False)
     return buf.getvalue()
 
+
+def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None) -> bytes:
+    import openpyxl  # type: ignore[import-not-found]
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    def _is_number(x: object) -> bool:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return False
+        return isinstance(x, (int, float, np.integer, np.floating))
+
+    def _write_table(
+        ws: "openpyxl.worksheet.worksheet.Worksheet",
+        df: pd.DataFrame,
+        *,
+        top_row: int,
+        left_col: int,
+        title: str,
+        shade_col_name: str | None = "오더수량 합계",
+        zero_as_dash_cols: set[str] | None = None,
+    ) -> None:
+        if df is None or df.empty:
+            return
+
+        zero_as_dash_cols = zero_as_dash_cols or set()
+
+        cols = list(df.columns)
+        ncols = len(cols)
+        title_row = top_row
+        header_row = top_row + 1
+        data_row0 = top_row + 2
+
+        thin = Side(style="thin", color="000000")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        header_fill = PatternFill("solid", fgColor="F2F2F2")
+        shade_fill = PatternFill("solid", fgColor="FFF2CC")
+        title_font = Font(bold=True, size=12)
+        header_font = Font(bold=True)
+
+        # Title (merged)
+        ws.cell(row=title_row, column=left_col, value=title).font = title_font
+        ws.cell(row=title_row, column=left_col).alignment = Alignment(horizontal="left", vertical="center")
+        if ncols > 1:
+            ws.merge_cells(
+                start_row=title_row,
+                start_column=left_col,
+                end_row=title_row,
+                end_column=left_col + ncols - 1,
+            )
+
+        # Header
+        for j, col_name in enumerate(cols):
+            c = ws.cell(row=header_row, column=left_col + j, value=str(col_name))
+            c.font = header_font
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.fill = header_fill
+            c.border = border
+
+        # Data
+        shade_idx = cols.index(shade_col_name) if shade_col_name in cols else None
+        for i, rec in enumerate(df.to_dict(orient="records")):
+            r = data_row0 + i
+            for j, col_name in enumerate(cols):
+                v = rec.get(col_name, None)
+                cell = ws.cell(row=r, column=left_col + j)
+                if _is_number(v):
+                    num = float(v)
+                    if col_name in zero_as_dash_cols and num == 0:
+                        cell.value = "-"
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                    else:
+                        cell.value = num
+                        cell.number_format = "#,##0"
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+                else:
+                    cell.value = "" if v is None else str(v)
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                cell.border = border
+                if shade_idx is not None and j == shade_idx:
+                    cell.fill = shade_fill
+
+        # Column widths (simple heuristic)
+        for j, col_name in enumerate(cols):
+            col_letter = get_column_letter(left_col + j)
+            max_len = max([len(str(col_name))] + [len(str(x)) for x in df[col_name].astype(str).tolist()])
+            ws.column_dimensions[col_letter].width = min(22, max(10, max_len + 2))
+
+        # Row heights
+        ws.row_dimensions[title_row].height = 20
+        ws.row_dimensions[header_row].height = 18
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "집계"
+
+    has_monthly = monthly is not None and not monthly.empty
+    has_cat = cat is not None and not cat.empty
+    if not has_monthly and not has_cat:
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    # Layout: two tables side-by-side with a gap (similar to the screenshot)
+    top_row = 1
+    monthly_left_col = 1
+    gap_cols = 2
+    monthly_width = int(monthly.shape[1]) if has_monthly else 5
+    cat_left_col = monthly_left_col + monthly_width + gap_cols
+
+    _write_table(
+        ws,
+        monthly if has_monthly else pd.DataFrame(),
+        top_row=top_row,
+        left_col=monthly_left_col,
+        title="월별 집계",
+        shade_col_name="오더수량 합계",
+        zero_as_dash_cols={"수주금액(원) 합계", "수주금액(달러) 합계"},
+    )
+    _write_table(
+        ws,
+        cat if has_cat else pd.DataFrame(),
+        top_row=top_row,
+        left_col=cat_left_col,
+        title="분류요약별 집계",
+        shade_col_name="오더수량 합계",
+        zero_as_dash_cols={"수주금액(원) 합계", "수주금액(달러) 합계"},
+    )
+
+    # Freeze pane at first data area
+    ws.freeze_panes = ws.cell(row=top_row + 2, column=monthly_left_col)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
 st.markdown(
     """
 <style>
@@ -1002,38 +1138,27 @@ with tabs[1]:
                         total_row[c] = float(cat[c].sum())
                 cat2 = pd.concat([cat, pd.DataFrame([total_row])], ignore_index=True)
 
+        has_monthly = not monthly2.empty
+        has_cat = cat2 is not None and not cat2.empty
+        has_summary = has_monthly or has_cat
+        summary_xlsx = _order_summary_to_xlsx_bytes(monthly2, cat2) if has_summary else b""
+
+        st.download_button(
+            "집계 엑셀(XLSX) 한번에 다운로드",
+            data=summary_xlsx,
+            file_name="S관_수주현황_집계.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=not has_summary,
+            use_container_width=True,
+            key="dl_order_summary_xlsx",
+        )
+
         left, right = st.columns(2)
 
         # ===== 월별 집계 =====
         with left:
             with st.container(border=True):
-                head_l, dl_l = st.columns([3, 2], vertical_alignment="center")
-                with head_l:
-                    st.markdown("**월별 집계**")
-                with dl_l:
-                    monthly_has_data = not monthly2.empty
-                    monthly_xlsx = (
-                        _df_to_xlsx_bytes(monthly2, sheet_name="월별 집계") if monthly_has_data else b""
-                    )
-                    monthly_csv = _df_to_csv_bytes(monthly2) if monthly_has_data else b""
-                    st.download_button(
-                        "XLSX 다운로드",
-                        data=monthly_xlsx,
-                        file_name="S관_수주현황_월별집계.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        disabled=not monthly_has_data,
-                        use_container_width=True,
-                        key="dl_monthly_xlsx",
-                    )
-                    st.download_button(
-                        "CSV 다운로드",
-                        data=monthly_csv,
-                        file_name="S관_수주현황_월별집계.csv",
-                        mime="text/csv",
-                        disabled=not monthly_has_data,
-                        use_container_width=True,
-                        key="dl_monthly_csv",
-                    )
+                st.markdown("**월별 집계**")
 
                 group_cols = ["월"]
                 if "구분" in monthly2.columns:
@@ -1056,31 +1181,7 @@ with tabs[1]:
         # ===== 분류요약별 집계 =====
         with right:
             with st.container(border=True):
-                head_r, dl_r = st.columns([3, 2], vertical_alignment="center")
-                with head_r:
-                    st.markdown("**분류요약별 집계**")
-                with dl_r:
-                    cat_has_data = cat2 is not None and not cat2.empty
-                    cat_xlsx = _df_to_xlsx_bytes(cat2, sheet_name="분류요약별 집계") if cat_has_data else b""
-                    cat_csv = _df_to_csv_bytes(cat2) if cat_has_data else b""
-                    st.download_button(
-                        "XLSX 다운로드",
-                        data=cat_xlsx,
-                        file_name="S관_수주현황_분류요약별집계.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        disabled=not cat_has_data,
-                        use_container_width=True,
-                        key="dl_cat_xlsx",
-                    )
-                    st.download_button(
-                        "CSV 다운로드",
-                        data=cat_csv,
-                        file_name="S관_수주현황_분류요약별집계.csv",
-                        mime="text/csv",
-                        disabled=not cat_has_data,
-                        use_container_width=True,
-                        key="dl_cat_csv",
-                    )
+                st.markdown("**분류요약별 집계**")
                 if "분류요약" not in df.columns:
                     st.info("S관 제품 마스터의 AY열(분류요약) 매핑을 확인하세요. 현재 데이터에 '분류요약' 컬럼이 없습니다.")
                 else:
