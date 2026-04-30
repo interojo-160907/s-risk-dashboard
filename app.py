@@ -66,7 +66,7 @@ def _df_to_xlsx_bytes(df: pd.DataFrame, *, sheet_name: str) -> bytes:
 
 def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None) -> bytes:
     import openpyxl  # type: ignore[import-not-found]
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.styles import Alignment, Border, Font, Side
     from openpyxl.utils import get_column_letter
 
     def _is_number(x: object) -> bool:
@@ -97,8 +97,6 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
 
         thin = Side(style="thin", color="000000")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        header_fill = PatternFill("solid", fgColor="F2F2F2")
-        shade_fill = PatternFill("solid", fgColor="FFF2CC")
         title_font = Font(bold=True, size=12)
         header_font = Font(bold=True)
 
@@ -118,7 +116,6 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
             c = ws.cell(row=header_row, column=left_col + j, value=str(col_name))
             c.font = header_font
             c.alignment = Alignment(horizontal="center", vertical="center")
-            c.fill = header_fill
             c.border = border
 
         # Data
@@ -142,8 +139,7 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
                     cell.alignment = Alignment(horizontal="left", vertical="center")
 
                 cell.border = border
-                if shade_idx is not None and j == shade_idx:
-                    cell.fill = shade_fill
+                _ = shade_idx  # 색상 미사용(요청에 따라 셀 색상 제거)
 
         # Column widths (simple heuristic)
         for j, col_name in enumerate(cols):
@@ -192,8 +188,7 @@ def _order_summary_to_xlsx_bytes(monthly: pd.DataFrame, cat: pd.DataFrame | None
         zero_as_dash_cols={"수주금액(원) 합계", "수주금액(달러) 합계"},
     )
 
-    # Freeze pane at first data area
-    ws.freeze_panes = ws.cell(row=top_row + 2, column=monthly_left_col)
+    # 틀 고정 없음(요청에 따라 제외)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -1143,15 +1138,17 @@ with tabs[1]:
         has_summary = has_monthly or has_cat
         summary_xlsx = _order_summary_to_xlsx_bytes(monthly2, cat2) if has_summary else b""
 
-        st.download_button(
-            "집계 엑셀(XLSX) 한번에 다운로드",
-            data=summary_xlsx,
-            file_name="S관_수주현황_집계.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            disabled=not has_summary,
-            use_container_width=True,
-            key="dl_order_summary_xlsx",
-        )
+        dl_col, _spacer = st.columns([1, 3], vertical_alignment="center")
+        with dl_col:
+            st.download_button(
+                "집계 XLSX 다운로드",
+                data=summary_xlsx,
+                file_name="S관_수주현황_집계.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                disabled=not has_summary,
+                use_container_width=True,
+                key="dl_order_summary_xlsx",
+            )
 
         left, right = st.columns(2)
 
