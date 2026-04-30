@@ -51,6 +51,18 @@ st.title("S관 생산실적 대시보드")
 paths = default_data_paths("data")
 logger = get_logger("streamlit.app", log_file="logs/streamlit_app.log")
 
+
+def _df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    # UTF-8 with BOM for Excel/PPT-friendly copy-paste
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def _df_to_xlsx_bytes(df: pd.DataFrame, *, sheet_name: str) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:  # type: ignore[call-arg]
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+    return buf.getvalue()
+
 st.markdown(
     """
 <style>
@@ -995,7 +1007,33 @@ with tabs[1]:
         # ===== 월별 집계 =====
         with left:
             with st.container(border=True):
-                st.markdown("**월별 집계**")
+                head_l, dl_l = st.columns([3, 2], vertical_alignment="center")
+                with head_l:
+                    st.markdown("**월별 집계**")
+                with dl_l:
+                    monthly_has_data = not monthly2.empty
+                    monthly_xlsx = (
+                        _df_to_xlsx_bytes(monthly2, sheet_name="월별 집계") if monthly_has_data else b""
+                    )
+                    monthly_csv = _df_to_csv_bytes(monthly2) if monthly_has_data else b""
+                    st.download_button(
+                        "XLSX 다운로드",
+                        data=monthly_xlsx,
+                        file_name="S관_수주현황_월별집계.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=not monthly_has_data,
+                        use_container_width=True,
+                        key="dl_monthly_xlsx",
+                    )
+                    st.download_button(
+                        "CSV 다운로드",
+                        data=monthly_csv,
+                        file_name="S관_수주현황_월별집계.csv",
+                        mime="text/csv",
+                        disabled=not monthly_has_data,
+                        use_container_width=True,
+                        key="dl_monthly_csv",
+                    )
 
                 group_cols = ["월"]
                 if "구분" in monthly2.columns:
@@ -1018,7 +1056,31 @@ with tabs[1]:
         # ===== 분류요약별 집계 =====
         with right:
             with st.container(border=True):
-                st.markdown("**분류요약별 집계**")
+                head_r, dl_r = st.columns([3, 2], vertical_alignment="center")
+                with head_r:
+                    st.markdown("**분류요약별 집계**")
+                with dl_r:
+                    cat_has_data = cat2 is not None and not cat2.empty
+                    cat_xlsx = _df_to_xlsx_bytes(cat2, sheet_name="분류요약별 집계") if cat_has_data else b""
+                    cat_csv = _df_to_csv_bytes(cat2) if cat_has_data else b""
+                    st.download_button(
+                        "XLSX 다운로드",
+                        data=cat_xlsx,
+                        file_name="S관_수주현황_분류요약별집계.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=not cat_has_data,
+                        use_container_width=True,
+                        key="dl_cat_xlsx",
+                    )
+                    st.download_button(
+                        "CSV 다운로드",
+                        data=cat_csv,
+                        file_name="S관_수주현황_분류요약별집계.csv",
+                        mime="text/csv",
+                        disabled=not cat_has_data,
+                        use_container_width=True,
+                        key="dl_cat_csv",
+                    )
                 if "분류요약" not in df.columns:
                     st.info("S관 제품 마스터의 AY열(분류요약) 매핑을 확인하세요. 현재 데이터에 '분류요약' 컬럼이 없습니다.")
                 else:
