@@ -1256,8 +1256,17 @@ with tabs[2]:
 
         scope = st.radio("스코프(공정)", ["기본(총합계+[85]포장)", "전체"], index=0, horizontal=True)
         if scope.startswith("기본"):
-            scope_processes = ("총합계", "[85]포장")
-            scope_key = "default"
+            # 기본 화면에서도 병목/과부하 분석을 위해 주요 공정까지 함께 로드
+            scope_processes = (
+                "[10]사출조립",
+                "[20]분리",
+                "[45]하이드레이션/전면검사",
+                "[55]접착/멸균",
+                "[80]누수/규격검사",
+                "[85]포장",
+                "총합계",
+            )
+            scope_key = "default_v2"
         else:
             xl = pd.ExcelFile(aps_path)
             date_sheets = [s for s in xl.sheet_names if s != "제품명등록" and str(s).isdigit()]
@@ -1314,6 +1323,7 @@ with tabs[2]:
         risk_df = tables.get("리스크요약", pd.DataFrame())
         total_df = tables.get("변동분석_총합계", pd.DataFrame())
         pack_df = tables.get("변동분석_포장", pd.DataFrame())
+        proc_load_df = tables.get("공정부하(7일)", pd.DataFrame())
 
         # 최신 기준일자(=금일 관리 기준)
         try:
@@ -1484,9 +1494,9 @@ with tabs[2]:
             product_type_col = "제품구분" if "제품구분" in base_action_df.columns else None
             initial_col = "이니셜" if "이니셜" in base_action_df.columns else None
 
-            # 초과일(납기초과) 기준 컬럼 선택: 요청납기(수주현황) 우선, 없으면 고객납기
+            # 초과일(납기초과) 기준 컬럼 선택: APS 고객납기일 기준(1순위)
             overdue_col = None
-            for c in ["초과일(변경-요청)", "초과일(변경-고객)"]:
+            for c in ["초과일(변경-고객)", "초과일(변경-요청)"]:
                 if c in base_action_df.columns:
                     overdue_col = c
                     break
@@ -1652,6 +1662,54 @@ with tabs[2]:
             else:
                 st.info("총합계 변동분석 데이터가 없어 트렌드를 표시할 수 없습니다.")
 
+            st.caption("공정 부하 vs 추정 Capa(생산실적 기반)")
+            base_proc_load_df = proc_load_df.copy() if "proc_load_df" in locals() else pd.DataFrame()
+            if base_proc_load_df.empty:
+                st.info("공정부하 데이터가 없습니다. (APS 분석 결과에 '공정부하(7일)'이 포함되어야 합니다)")
+            elif prod_df.empty:
+                st.info("생산실적 데이터가 없어 Capa를 추정할 수 없습니다.")
+            else:
+                # 실적 기반 일일 capa 추정(공정별: 최근 60일 일실적의 80% 분위수)
+                try:
+                    lookback_days = 60
+                    q = 0.80
+                    end_day = asof - timedelta(days=1)
+                    start_day = end_day - timedelta(days=lookback_days - 1)
+
+                    gross_col = PROD_COLS.양품수량 if PROD_COLS.양품수량 in prod_df.columns else PROD_COLS.생산수량
+                    ptmp = prod_df.copy()
+                    ptmp[PROD_COLS.생산일자] = pd.to_datetime(ptmp[PROD_COLS.생산일자], errors="coerce").dt.date
+                    ptmp = ptmp[(ptmp[PROD_COLS.생산일자] >= start_day) & (ptmp[PROD_COLS.생산일자] <= end_day)].copy()
+                    ptmp[gross_col] = pd.to_numeric(ptmp[gross_col], errors="coerce").fillna(0)
+                    daily_actual = (
+                        ptmp.groupby([PROD_COLS.생산일자, PROD_COLS.공정], dropna=False)[gross_col]
+                        .sum()
+                        .reset_index()
+                        .rename(columns={gross_col: "일실적"})
+                    )
+                    capa = (
+                        daily_actual.groupby(PROD_COLS.공정, dropna=False)["일실적"]
+                        .quantile(q)
+                        .reset_index()
+                        .rename(columns={PROD_COLS.공정: "공정", "일실적": "추정_capa"})
+                    )
+                    capa["추정_capa"] = pd.to_numeric(capa["추정_capa"], errors="coerce").fillna(0).round(0).astype(int)
+
+                    load = base_proc_load_df.copy()
+                    load["공정"] = load["공정"].astype(str)
+                    load["필요수량"] = pd.to_numeric(load.get("필요수량"), errors="coerce").fillna(0)
+                    merged = load.merge(capa, on="공정", how="left")
+                    merged["추정_capa"] = pd.to_numeric(merged["추정_capa"], errors="coerce").fillna(0)
+                    merged["부하율"] = np.where(merged["추정_capa"] > 0, merged["필요수량"] / merged["추정_capa"], np.nan)
+                    merged["과부하"] = np.where(merged["부하율"] > 1.0, "Y", "")
+
+                    # 요약: 과부하 Top
+                    top_over = merged.sort_values(["부하율", "필요수량"], ascending=[False, False]).head(20)
+                    show_cols = [c for c in ["기준일자", "공정", "필요수량", "추정_capa", "부하율", "과부하", "제품군수", "SKU수"] if c in top_over.columns]
+                    st.dataframe(top_over[show_cols], use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.warning(f"Capa/부하 계산 중 오류: {e}")
+
         # 이후 표시는 필터 적용된 DF를 사용(다운로드는 원본 tables 사용)
         action_df_for_view = filtered_action_df
         risk_df_for_view = filtered_risk_df
@@ -1677,17 +1735,20 @@ with tabs[2]:
                 "수주번호",
                 "제품명코드",
                 "제품명_마스터",
+                "납기가능",
                 "수주현황_고객",
                 "수주현황_출처",
                 "수주현황_미매칭사유",
-                "요청납기일",
+                "고객납기일",
                 "변경 납기일(당일 종료예정일)",
                 "기존 납기일(전일 종료예정일)",
                 "변동일수",
-                "초과일(변경-요청)",
+                "초과일(변경-고객)",
                 "원인",
                 "조치유형",
                 "SKU수",
+                "병목공정",
+                "병목공정_종료예정일",
             ]
             show_cols = [c for c in show_cols if c in view.columns]
             if "수주현황_고객" in view.columns:

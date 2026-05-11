@@ -45,6 +45,32 @@ class APSVariationCols:
 COLS = APSVariationCols()
 
 
+def normalize_process(code: object) -> str:
+    """
+    APS 공정코드(예: '[55]접착/멸균')를 실적/표시용 공정명으로 정규화한다.
+    """
+    if pd.isna(code):
+        return ""
+    s = str(code).strip()
+    if not s:
+        return ""
+    if s.startswith("[10]"):
+        return "사출조립"
+    if s.startswith("[20]"):
+        return "분리"
+    if s.startswith("[45]"):
+        return "하이드레이션/전면검"
+    if s.startswith("[55]"):
+        return "접착/멸균"
+    if s.startswith("[80]"):
+        return "누수/규격검사"
+    if s.startswith("[85]"):
+        return "포장"
+    if "총합계" in s:
+        return "총합계"
+    return s
+
+
 def parse_sheet_date(sheet_name: str) -> date | None:
     s = str(sheet_name).strip()
     if not s.isdigit():
@@ -450,6 +476,31 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
+    # 병목공정: 최신 기준일자에서 (총합계 제외) 종료예정일이 가장 늦는 공정
+    try:
+        latest = df[pd.to_datetime(df[COLS.기준일자], errors="coerce").dt.date == max_day].copy()
+        latest = latest[latest[COLS.공정코드].astype(str) != "총합계"].copy()
+        if not latest.empty:
+            tmp = latest.copy()
+            tmp[COLS.종료예정일] = pd.to_datetime(tmp[COLS.종료예정일], errors="coerce")
+            tmp["_proc_norm"] = tmp[COLS.공정코드].map(normalize_process)
+            per_proc = (
+                tmp.groupby([COLS.수주번호, COLS.제품명코드, "_proc_norm"], dropna=False)[COLS.종료예정일]
+                .max()
+                .reset_index()
+            )
+            idx = per_proc.groupby([COLS.수주번호, COLS.제품명코드], dropna=False)[COLS.종료예정일].idxmax()
+            bottleneck = per_proc.loc[idx, [COLS.수주번호, COLS.제품명코드, "_proc_norm", COLS.종료예정일]].copy()
+            bottleneck = bottleneck.rename(columns={"_proc_norm": "병목공정", COLS.종료예정일: "병목공정_종료예정일"})
+            bottleneck["병목공정_종료예정일"] = pd.to_datetime(bottleneck["병목공정_종료예정일"], errors="coerce").dt.date
+            grouped = grouped.merge(
+                bottleneck[[COLS.수주번호, COLS.제품명코드, "병목공정", "병목공정_종료예정일"]],
+                on=[COLS.수주번호, COLS.제품명코드],
+                how="left",
+            )
+    except Exception:
+        pass
+
     grouped["기존 납기일(전일 종료예정일)"] = grouped["기존_종료예정일"]
     grouped["변경 납기일(당일 종료예정일)"] = grouped["변경_종료예정일"]
     grouped[COLS.변동일수] = (
@@ -458,6 +509,13 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
     grouped["초과일(변경-고객)"] = (
         pd.to_datetime(grouped["변경_종료예정일"], errors="coerce") - pd.to_datetime(grouped["고객납기일"], errors="coerce")
     ).dt.days
+
+    # 납기 가능 여부(APS 고객납기일 기준)
+    grouped["납기가능"] = (
+        pd.to_numeric(grouped["초과일(변경-고객)"], errors="coerce")
+        .fillna(0)
+        .map(lambda x: "가능" if x <= 0 else "불가")
+    )
 
     action_map = {
         "수주 증가": "납기 협의",
@@ -476,6 +534,7 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
         COLS.제품그룹코드,
         COLS.수주번호,
         COLS.제품명코드,
+        "납기가능",
         "고객납기일",
         "기존 납기일(전일 종료예정일)",
         "변경 납기일(당일 종료예정일)",
@@ -485,6 +544,8 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
         COLS.조치유형,
         "SKU수",
         COLS.수량변동,
+        "병목공정",
+        "병목공정_종료예정일",
         "협의상태",
         "비고",
         COLS.제품명_마스터,
@@ -492,6 +553,49 @@ def build_action_list(df: pd.DataFrame) -> pd.DataFrame:
     ]
     cols = [c for c in cols if c in grouped.columns]
     return grouped[cols].sort_values([COLS.변동일수, "초과일(변경-고객)"], ascending=[False, False])
+
+
+def build_process_load(df_long: pd.DataFrame, *, days: int = 7) -> pd.DataFrame:
+    """
+    공정별 일자별 필요수량(부하) 집계.
+    - 입력: build_aps_long_table 결과(long format)
+    - 출력: 기준일자/공정/필요수량/제품군수/sku수
+    """
+    if df_long.empty:
+        return df_long
+
+    tmp = df_long.copy()
+    tmp[COLS.기준일자] = pd.to_datetime(tmp[COLS.기준일자], errors="coerce").dt.date
+    tmp[COLS.필요수량] = pd.to_numeric(tmp[COLS.필요수량], errors="coerce").fillna(0)
+    tmp["_proc_norm"] = tmp[COLS.공정코드].map(normalize_process)
+    tmp[COLS.제품명코드] = tmp[COLS.제품명코드].astype(str)
+
+    max_day = pd.to_datetime(tmp[COLS.기준일자], errors="coerce").dt.date.max()
+    if max_day is None or pd.isna(max_day):
+        return pd.DataFrame()
+    start_day = max_day.fromordinal(max_day.toordinal() - (days - 1))
+    win = tmp[(tmp[COLS.기준일자] >= start_day) & (tmp[COLS.기준일자] <= max_day)].copy()
+
+    # 총합계는 공정 부하 산정에서 제외(실제 공정이 아님)
+    win = win[win["_proc_norm"].ne("총합계")].copy()
+    if win.empty:
+        return pd.DataFrame(columns=["윈도우_시작", "윈도우_종료", COLS.기준일자, "공정", "필요수량", "제품군수", "SKU수"])
+
+    win["_group_key"] = win[COLS.수주번호].astype(str) + "|" + win[COLS.제품명코드].astype(str)
+    agg = (
+        win.groupby([COLS.기준일자, "_proc_norm"], dropna=False)
+        .agg(
+            필요수량=(COLS.필요수량, "sum"),
+            제품군수=("_group_key", lambda x: int(pd.Series(x).nunique())),
+            SKU수=(COLS.수요제품코드, lambda x: int(pd.Series(x).dropna().astype(str).nunique())),
+        )
+        .reset_index()
+        .rename(columns={"_proc_norm": "공정"})
+        .sort_values([COLS.기준일자, "필요수량"], ascending=[True, False])
+    )
+    agg["윈도우_시작"] = start_day
+    agg["윈도우_종료"] = max_day
+    return agg
 
 
 def analyze_workbook(
@@ -510,12 +614,14 @@ def analyze_workbook(
 
     risk = build_risk_summary(classified, days=7)
     actions = build_action_list(classified)
+    proc_load = build_process_load(long_df, days=7)
 
     return {
         "변동분석_총합계": total,
         "변동분석_포장": pack,
         "리스크요약": risk,
         "액션리스트": actions,
+        "공정부하(7일)": proc_load,
     }
 
 
