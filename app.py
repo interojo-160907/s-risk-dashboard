@@ -1472,10 +1472,194 @@ with tabs[2]:
                 action_df.loc[miss, "수주현황_미매칭사유"] = action_df[miss].apply(_reason, axis=1)
                 action_df.loc[~miss, "수주현황_미매칭사유"] = ""
 
+        # 인사이트(요약/분포/트렌드) + 필터 (수주현황 매칭 이후 기준)
+        st.markdown("### 인사이트")
+        with st.expander("필터/요약 보기", expanded=True):
+            base_action_df = action_df.copy()
+            base_risk_df = risk_df.copy()
+            base_total_df = total_df.copy()
+
+            # 공통 필터 후보 컬럼
+            cause_col = "원인" if "원인" in base_action_df.columns else None
+            product_type_col = "제품구분" if "제품구분" in base_action_df.columns else None
+            initial_col = "이니셜" if "이니셜" in base_action_df.columns else None
+
+            # 초과일(납기초과) 기준 컬럼 선택: 요청납기(수주현황) 우선, 없으면 고객납기
+            overdue_col = None
+            for c in ["초과일(변경-요청)", "초과일(변경-고객)"]:
+                if c in base_action_df.columns:
+                    overdue_col = c
+                    break
+
+            f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.2, 0.9])
+            with f1:
+                selected_causes = []
+                if cause_col:
+                    opts = (
+                        base_action_df[cause_col]
+                        .fillna("")
+                        .astype(str)
+                        .replace("", "미분류")
+                        .sort_values()
+                        .unique()
+                        .tolist()
+                    )
+                    selected_causes = st.multiselect("원인", opts, default=opts)
+            with f2:
+                selected_product_types = []
+                if product_type_col:
+                    opts = (
+                        base_action_df[product_type_col]
+                        .fillna("")
+                        .astype(str)
+                        .replace("", "미분류")
+                        .sort_values()
+                        .unique()
+                        .tolist()
+                    )
+                    selected_product_types = st.multiselect("제품구분", opts, default=opts)
+            with f3:
+                selected_initials = []
+                if initial_col:
+                    opts = (
+                        base_action_df[initial_col]
+                        .fillna("")
+                        .astype(str)
+                        .replace("", "미분류")
+                        .sort_values()
+                        .unique()
+                        .tolist()
+                    )
+                    selected_initials = st.multiselect("이니셜", opts, default=opts)
+            with f4:
+                only_overdue = st.checkbox("납기초과만", value=False, help="초과일(변경-요청/고객) > 0 기준")
+
+            filtered_action_df = base_action_df
+            if cause_col and selected_causes:
+                s = filtered_action_df[cause_col].fillna("").astype(str).replace("", "미분류")
+                filtered_action_df = filtered_action_df[s.isin(selected_causes)].copy()
+            if product_type_col and selected_product_types:
+                s = filtered_action_df[product_type_col].fillna("").astype(str).replace("", "미분류")
+                filtered_action_df = filtered_action_df[s.isin(selected_product_types)].copy()
+            if initial_col and selected_initials:
+                s = filtered_action_df[initial_col].fillna("").astype(str).replace("", "미분류")
+                filtered_action_df = filtered_action_df[s.isin(selected_initials)].copy()
+            if only_overdue and overdue_col:
+                ov = pd.to_numeric(filtered_action_df[overdue_col], errors="coerce").fillna(0)
+                filtered_action_df = filtered_action_df[ov > 0].copy()
+
+            # risk_df는 action_df 필터 조건에 최대한 맞춰서 동일 단위(수주번호+제품명코드)로 제한
+            filtered_risk_df = base_risk_df
+            if not filtered_action_df.empty and not base_risk_df.empty:
+                if all(c in filtered_action_df.columns for c in ["수주번호", "제품명코드"]) and all(
+                    c in base_risk_df.columns for c in ["수주번호", "제품명코드"]
+                ):
+                    keys = filtered_action_df[["수주번호", "제품명코드"]].drop_duplicates()
+                    filtered_risk_df = base_risk_df.merge(keys, on=["수주번호", "제품명코드"], how="inner")
+
+            # KPI
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            with kpi1:
+                st.metric("표시 액션", f"{len(filtered_action_df):,}" if not filtered_action_df.empty else "0")
+            with kpi2:
+                if overdue_col and not filtered_action_df.empty:
+                    ov = pd.to_numeric(filtered_action_df[overdue_col], errors="coerce").fillna(0)
+                    st.metric("납기초과 건수", f"{int((ov > 0).sum()):,}")
+                else:
+                    st.metric("납기초과 건수", "-")
+            with kpi3:
+                if overdue_col and not filtered_action_df.empty:
+                    ov = pd.to_numeric(filtered_action_df[overdue_col], errors="coerce").fillna(0)
+                    mx = ov.max()
+                    st.metric("최대 초과(일)", f"{int(mx):,}" if pd.notna(mx) else "-")
+                else:
+                    st.metric("최대 초과(일)", "-")
+            with kpi4:
+                if not filtered_risk_df.empty and "변동_횟수" in filtered_risk_df.columns:
+                    n = int((pd.to_numeric(filtered_risk_df["변동_횟수"], errors="coerce").fillna(0) > 0).sum())
+                    st.metric("7일 변동 수주", f"{n:,}")
+                else:
+                    st.metric("7일 변동 수주", "-")
+
+            c1, c2 = st.columns([1.0, 1.0])
+            with c1:
+                st.caption("원인 분포(액션 기준)")
+                if not filtered_action_df.empty and cause_col:
+                    s = filtered_action_df[cause_col].fillna("").astype(str).replace("", "미분류")
+                    st.bar_chart(s.value_counts().sort_values(ascending=False))
+                else:
+                    st.info("표시할 데이터가 없습니다.")
+
+            with c2:
+                st.caption("납기초과 분포(초과일 버킷)")
+                if not filtered_action_df.empty and overdue_col:
+                    ov = pd.to_numeric(filtered_action_df[overdue_col], errors="coerce").fillna(0)
+                    buckets = pd.cut(
+                        ov,
+                        bins=[-10_000, 0, 3, 7, 10_000],
+                        labels=["0 이하", "1~3", "4~7", "8+"],
+                        right=True,
+                    )
+                    st.bar_chart(buckets.value_counts().sort_values(ascending=False))
+                else:
+                    st.info("초과일 컬럼이 없거나 데이터가 없습니다.")
+
+            st.caption("고객 Top(납기초과 기준)")
+            if not filtered_action_df.empty and overdue_col:
+                customer_col = (
+                    "수주현황_고객"
+                    if "수주현황_고객" in filtered_action_df.columns
+                    else ("거래처명" if "거래처명" in filtered_action_df.columns else None)
+                )
+                if customer_col:
+                    tmp = filtered_action_df.copy()
+                    tmp["_초과일"] = pd.to_numeric(tmp[overdue_col], errors="coerce").fillna(0)
+                    tmp["_고객"] = tmp[customer_col].fillna("미분류").astype(str).replace("", "미분류")
+                    top = (
+                        tmp[tmp["_초과일"] > 0]
+                        .groupby("_고객", dropna=False)
+                        .agg(납기초과_건수=("_초과일", "size"), 최대_초과일=("_초과일", "max"))
+                        .sort_values(["납기초과_건수", "최대_초과일"], ascending=[False, False])
+                        .head(10)
+                        .reset_index()
+                        .rename(columns={"_고객": "고객"})
+                    )
+                    st.dataframe(top, use_container_width=True, hide_index=True)
+                else:
+                    st.info("고객 컬럼이 없어 Top 고객을 계산할 수 없습니다.")
+            else:
+                st.info("납기초과 계산을 위한 초과일 컬럼이 없거나 데이터가 없습니다.")
+
+            st.caption("일자별 트렌드(총합계 기준)")
+            if not base_total_df.empty and "기준일자" in base_total_df.columns:
+                tmp = base_total_df.copy()
+                tmp["기준일자"] = pd.to_datetime(tmp["기준일자"], errors="coerce").dt.date
+                if "이벤트" in tmp.columns:
+                    tmp["이벤트"] = tmp["이벤트"].fillna(False).astype(bool)
+                if "변동일수" in tmp.columns:
+                    tmp["_delay"] = pd.to_numeric(tmp["변동일수"], errors="coerce").fillna(0) > 0
+                else:
+                    tmp["_delay"] = False
+                daily = (
+                    tmp.groupby("기준일자", dropna=False)
+                    .agg(
+                        이벤트_건수=("이벤트", lambda x: int(pd.Series(x).fillna(False).sum())),
+                        지연_건수=("_delay", lambda x: int(pd.Series(x).fillna(False).sum())),
+                    )
+                    .sort_index()
+                )
+                st.line_chart(daily)
+            else:
+                st.info("총합계 변동분석 데이터가 없어 트렌드를 표시할 수 없습니다.")
+
+        # 이후 표시는 필터 적용된 DF를 사용(다운로드는 원본 tables 사용)
+        action_df_for_view = filtered_action_df
+        risk_df_for_view = filtered_risk_df
+
         t1, t2, t3, t4 = st.tabs(["액션리스트", "리스크요약(7일)", "변동분석_총합계", "변동분석_포장"])
         with t1:
             st.caption("업무 처리용(최신 기준일자, 총합계 이벤트)")
-            view = action_df.copy()
+            view = action_df_for_view.copy() if "action_df_for_view" in locals() else action_df.copy()
             if "__요청일_dt__" in view.columns:
                 view["요청납기일"] = pd.to_datetime(view["__요청일_dt__"], errors="coerce").dt.date
             if "고객납기일" in view.columns:
@@ -1513,7 +1697,8 @@ with tabs[2]:
             st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
         with t2:
             st.caption("불안정 수주 요약(최근 7일, 총합계 기준)")
-            st.dataframe(risk_df, use_container_width=True, hide_index=True)
+            view2 = risk_df_for_view if "risk_df_for_view" in locals() else risk_df
+            st.dataframe(view2, use_container_width=True, hide_index=True)
         with t3:
             st.dataframe(total_df, use_container_width=True, hide_index=True)
         with t4:
