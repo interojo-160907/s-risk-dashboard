@@ -704,7 +704,9 @@ def _normalize_process_names(df: pd.DataFrame) -> pd.DataFrame:
 prod_df = _normalize_process_names(prod_df)
 
 with st.sidebar:
-    asof = st.date_input("기준일", value=date.today())
+    # Streamlit 서버가 UTC/미국시간으로 동작하면 `date.today()`가 한국 기준보다 하루 느릴 수 있어
+    # 당월 cutoff(전일) 집계가 1일 덜 잡히는 문제가 생김. 기준일 기본값은 KST로 고정.
+    asof = st.date_input("기준일", value=datetime.now(ZoneInfo("Asia/Seoul")).date())
 
 tabs = st.tabs(["S관 실적", "S관 수주현황", "APS 리스크관리"])
 
